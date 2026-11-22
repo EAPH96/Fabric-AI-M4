@@ -1,7 +1,10 @@
-# Blueprint de Render del HR Assistant (spec/04-production.md, punto 7).
-# El servicio se llama igual que el repositorio para no actualizar por error otro
-# servicio que ya exista en la cuenta.
+# Blueprint de Render del repositorio: un servicio por producto
+# (spec/04-production.md, punto 7, y spec/06-politicas.md, Despliegue).
+# El nombre de cada servicio no se cambia nunca: si cambia, Render crea otro
+# servicio en lugar de actualizar el que ya existe.
 services:
+  # HR Assistant. Se llama igual que el repositorio para no actualizar por error
+  # otro servicio que ya exista en la cuenta.
   - type: web
     name: Fabric-AI-M4
     runtime: docker
@@ -9,7 +12,7 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # Publica solo cuando el pipeline de CI (style, unit, e2e, docker) pasa.
+    # Publica solo cuando pasan todas las etapas del pipeline de CI del commit.
     autoDeployTrigger: checksPass
     envVars:
       # Con production el producto revisa las reglas de compliance al arrancar.
@@ -27,6 +30,43 @@ services:
       - key: CF_ACCOUNT_ID
         sync: false
       - key: CF_API_TOKEN
+        sync: false
+      # LANGSMITH_API_KEY es opcional: se agrega en Render > Environment solo si se
+      # encienden las trazas (LANGSMITH_TRACING=true).
+
+  # Asistente de políticas de RH: servicio aparte, construido solo con politicas/.
+  # Las rutas son relativas a la raíz del repositorio.
+  - type: web
+    name: Fabric-AI-M4-politicas
+    runtime: docker
+    plan: free
+    dockerfilePath: ./politicas/Dockerfile
+    dockerContext: ./politicas
+    healthCheckPath: /health
+    # Publica solo cuando pasan todas las etapas del pipeline de CI del commit.
+    autoDeployTrigger: checksPass
+    envVars:
+      # Con production el producto revisa las reglas de compliance al arrancar.
+      - key: ENVIRONMENT
+        value: production
+      - key: MODEL_PROVIDER
+        value: gateway
+      - key: HIDE_INPUTS
+        value: "true"
+      - key: HIDE_OUTPUTS
+        value: "true"
+      - key: SERVICE_NAME
+        value: politicas-rh
+      # Secretos: Render pide su valor al crear el Blueprint; nunca van en el repositorio.
+      # API_KEYS lleva claves propias de este servicio, distintas de las del HR.
+      - key: API_KEYS
+        sync: false
+      - key: CF_ACCOUNT_ID
+        sync: false
+      - key: CF_API_TOKEN
+        sync: false
+      # URL pública del HR Assistant para el enlace del encabezado.
+      - key: COMPANION_URL
         sync: false
       # LANGSMITH_API_KEY es opcional: se agrega en Render > Environment solo si se
       # encienden las trazas (LANGSMITH_TRACING=true).

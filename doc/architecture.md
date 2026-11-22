@@ -7,7 +7,9 @@ medir (`/metrics`). Desde la sesión 3, cada respuesta dice qué modelo usó, po
 Desde la sesión 4, solo entra quien tiene clave, cada cliente tiene un límite por minuto, la
 configuración de producción se revisa al arrancar y el producto se publica en Render solo si el
 pipeline de CI pasa. Desde la especificación 05, queda escrito por qué atiende peticiones
-simultáneas y la página enlaza con el segundo producto, el Asistente de políticas de RH.
+simultáneas y la página enlaza con el segundo producto, el Asistente de políticas de RH. Desde la
+especificación 06, ese segundo producto vive en `politicas/` del mismo repositorio y se publica como
+otro servicio del mismo Blueprint; el código del HR no cambia (ver `politicas/doc/architecture.md`).
 
 ## Componentes
 
@@ -142,16 +144,23 @@ copias, cada una lleva su propia cuenta. Más de 40 peticiones a la vez esperan 
 
 ## Del código a producción
 
+Desde la especificación 06, `render.yaml` y `ci.yml` son de los dos servicios. El bloque del HR y sus
+cuatro etapas no cambian; se agregan el servicio y las etapas de Políticas (ADR 0001 de Políticas).
+
 ```mermaid
 flowchart LR
-    F["Fábrica<br/>verification unit, contract,<br/>qa, e2e, evaluate"] --> AP{"Aprobación<br/>de una persona<br/>output/approved.txt"}
+    F["Fábrica<br/>verification unit, contract,<br/>qa, e2e, evaluate (hr) y (politicas)"] --> AP{"Aprobación<br/>de una persona<br/>output/approved.txt"}
     AP -- "scripts/publish.py" --> GH[(GitHub, repositorio privado)]
-    GH --> CI["GitHub Actions ci.yml<br/>style -> unit -> e2e -> docker"]
-    CI -- "checksPass" --> RD["Render Blueprint<br/>render.yaml, runtime docker"]
-    SEC["Secretos en Render > Environment<br/>API_KEYS, CF_ACCOUNT_ID, CF_API_TOKEN"] --> RD
-    RD --> IMG["Imagen python:3.12-slim<br/>usuario no root<br/>uvicorn en PORT"]
-    IMG -- "arranque: compliance" --> LIVE["Servicio Live<br/>healthCheckPath /health"]
-    LIVE --> SM["verification production URL<br/>SMOKE_API_KEY"]
+    GH --> CI["ci.yml, cadena del HR<br/>style -> unit -> e2e -> docker"]
+    GH --> CIP["ci.yml, cadena de Políticas<br/>style-politicas -> unit-politicas<br/>-> e2e-politicas -> docker-politicas"]
+    CI -- "checksPass: las 8 etapas" --> RD["Render Blueprint<br/>render.yaml, runtime docker"]
+    CIP -- "checksPass: las 8 etapas" --> RD
+    SEC["Secretos en Render > Environment<br/>API_KEYS, CF_ACCOUNT_ID, CF_API_TOKEN<br/>(COMPANION_URL a mano)"] --> RD
+    RD --> IMG["Fabric-AI-M4<br/>Dockerfile en la raíz<br/>python:3.12-slim, usuario no root"]
+    RD --> IMGP["Fabric-AI-M4-politicas<br/>politicas/Dockerfile<br/>contexto politicas/"]
+    IMG -- "arranque: compliance" --> LIVE["Cada servicio Live<br/>healthCheckPath /health"]
+    IMGP -- "arranque: compliance" --> LIVE
+    LIVE --> SM["verification production url-hr url-politicas<br/>SMOKE_API_KEY y SMOKE_API_KEY_POLITICAS"]
     SM -- "falla" --> TRI["triage<br/>security, deploy o persona"]
 ```
 
@@ -173,6 +182,8 @@ flowchart LR
   escriben, con candado (ADR 0013).
 - El enlace al otro producto se arma en el servidor al arrancar, escapado y en otra pestaña; sin
   `COMPANION_URL` no aparece (ADR 0014).
+- Políticas no importa nada de `app/`: copia sus módulos y se construye con su propia carpeta; un
+  fallo de sus etapas de CI también frena la publicación del HR (ADR 0001 y 0002 de Políticas).
 - Inyección de dependencias en `create_app(settings, model, directory, observability, models)`; la
   hora llega por un `Clock` inyectado.
 
@@ -197,5 +208,7 @@ flowchart LR
   `client`.
 - Métricas: `GET /metrics` con una clave; el `pid` dice de qué copia vienen.
 - Documentación de la API: Swagger en `/docs`, abierto sin clave, con «Authorize» para `X-API-Key`.
-- Pipeline: la pestaña Actions del repositorio, una etapa por trabajo.
-- Producción: `uv run python -m verification production <url>` con `SMOKE_API_KEY` en el entorno.
+- Pipeline: la pestaña Actions del repositorio, una etapa por trabajo; las de Políticas terminan en
+  `-politicas`.
+- Producción: `uv run python -m verification production <url-hr> <url-politicas>` con `SMOKE_API_KEY`
+  y `SMOKE_API_KEY_POLITICAS` en el entorno (solo la URL del HR si Políticas aún no está publicada).

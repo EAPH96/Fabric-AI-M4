@@ -1,0 +1,72 @@
+[
+  {
+    "id": "POL-001",
+    "title": "Vacaciones",
+    "topic": "vacaciones",
+    "keywords": ["vacaciones", "días de descanso pagados"],
+    "text": "Después de un año de servicio, la persona tiene 12 días de vacaciones pagadas. Aumentan 2 días por cada año hasta llegar a 20 días al quinto año; desde el sexto año aumentan 2 días por cada cinco años de servicio. Al menos 12 días se toman de forma continua, y se solicitan con 15 días de anticipación a la persona responsable."
+  },
+  {
+    "id": "POL-002",
+    "title": "Prima vacacional",
+    "topic": "prima vacacional",
+    "keywords": ["prima vacacional", "prima"],
+    "text": "Durante las vacaciones se paga una prima vacacional de 25 % del salario correspondiente a los días de vacaciones. Se paga junto con la nómina anterior al inicio de las vacaciones."
+  },
+  {
+    "id": "POL-003",
+    "title": "Aguinaldo",
+    "topic": "aguinaldo",
+    "keywords": ["aguinaldo"],
+    "text": "El aguinaldo equivale a 15 días de salario y se paga antes del 20 de diciembre. Quien no completó el año recibe la parte proporcional al tiempo trabajado."
+  },
+  {
+    "id": "POL-004",
+    "title": "Días festivos",
+    "topic": "días festivos",
+    "keywords": ["días festivos", "festivos", "días de descanso obligatorio"],
+    "text": "Son días de descanso obligatorio con goce de sueldo: 1 de enero, primer lunes de febrero, tercer lunes de marzo, 1 de mayo, 16 de septiembre, tercer lunes de noviembre, 25 de diciembre, el 1 de octubre de cada seis años por la transmisión del Poder Ejecutivo Federal y los días de jornada electoral. Quien trabaja un día festivo recibe salario doble además de su salario."
+  },
+  {
+    "id": "POL-005",
+    "title": "Jornada de trabajo",
+    "topic": "jornada",
+    "keywords": ["jornada", "horario", "horas extra"],
+    "text": "La jornada diurna es de 8 horas, la mixta de 7.5 horas y la nocturna de 7 horas, con una semana de máximo 48 horas. Hay 30 minutos de descanso a la mitad de la jornada. Las horas extra se autorizan por escrito y se pagan al doble, hasta 9 horas por semana."
+  },
+  {
+    "id": "POL-006",
+    "title": "Permiso de paternidad",
+    "topic": "paternidad",
+    "keywords": ["paternidad", "papá", "padre"],
+    "text": "Por el nacimiento o la adopción de una hija o un hijo, el padre tiene 5 días laborables de permiso con goce de sueldo. Se avisa a Recursos Humanos y se entrega el acta de nacimiento o la constancia de adopción."
+  },
+  {
+    "id": "POL-007",
+    "title": "Licencia de maternidad",
+    "topic": "maternidad",
+    "keywords": ["maternidad", "embarazo", "lactancia"],
+    "text": "La persona embarazada tiene 6 semanas de descanso antes del parto y 6 semanas después, con goce de sueldo; puede transferir hasta 4 de las semanas previas al periodo posterior. Durante la lactancia, hasta por seis meses, tiene dos descansos de media hora al día o una hora menos de jornada."
+  },
+  {
+    "id": "POL-008",
+    "title": "Trabajo desde casa",
+    "topic": "home office",
+    "keywords": ["home office", "teletrabajo", "desde casa", "remoto"],
+    "text": "Los puestos que lo permiten pueden trabajar desde casa hasta tres días por semana, con acuerdo escrito con la persona responsable. La empresa entrega el equipo de cómputo y una ayuda mensual para internet y electricidad. Se respeta el derecho a la desconexión fuera del horario."
+  },
+  {
+    "id": "POL-009",
+    "title": "Código de vestimenta",
+    "topic": "vestimenta",
+    "keywords": ["vestimenta", "ropa", "uniforme"],
+    "text": "En la oficina se usa ropa casual de negocios de lunes a jueves y casual los viernes. En reuniones con clientes se usa ropa formal. Las áreas con uniforme lo usan en todo el horario."
+  },
+  {
+    "id": "POL-010",
+    "title": "Viáticos",
+    "topic": "viáticos",
+    "keywords": ["viáticos", "gastos de viaje", "comprobación"],
+    "text": "Los viajes de trabajo se solicitan con 5 días de anticipación. Los viáticos cubren transporte, hospedaje y alimentos hasta los montos de la tabla de viáticos. Los gastos se comprueban con facturas electrónicas a nombre de la empresa en los 5 días hábiles después del regreso."
+  }
+]
