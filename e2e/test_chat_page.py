@@ -3,7 +3,8 @@
 Usan la página como una persona: escriben la clave, escriben en la caja de
 pregunta, pulsan Enviar y revisan lo que queda en pantalla. El producto corre
 con el modelo simulado; la URL base y la clave (``E2E_API_KEY``) las pone la
-verificación. La clave nunca se escribe en este archivo.
+verificación. La clave nunca se escribe en este archivo. El producto arranca
+sin ``COMPANION_URL``, así que la página no debe mostrar el enlace a Políticas.
 """
 
 import os
@@ -65,28 +66,23 @@ def test_asking_a_question_shows_the_answer_and_its_request_id(page: Page):
     expect(request_id).to_contain_text(body["request_id"])
 
 
-def test_sending_an_empty_question_shows_an_error_message_in_spanish(page: Page):
-    """Pulsar Enviar sin escribir nada muestra un error en español en la página."""
+def test_an_empty_or_blank_question_shows_an_error_message_in_spanish(page: Page):
+    """Enviar sin texto o con solo espacios muestra un error en español.
+
+    Cada intento deja su propio mensaje de error y ninguno llega a la API, así
+    que no aparece ningún ``request_id``.
+    """
     page.goto("/")
     _enter_api_key(page)
+    errors = page.get_by_test_id("answer").get_by_text(SPANISH_QUESTION_ERROR)
 
     page.get_by_test_id("send").click()
-
-    conversation = page.get_by_test_id("answer")
-    expect(conversation).to_contain_text(SPANISH_QUESTION_ERROR)
-    expect(page.get_by_test_id("request-id")).to_have_count(0)
-
-
-def test_sending_a_blank_question_shows_an_error_message_in_spanish(page: Page):
-    """Una pregunta de solo espacios muestra un error en español en la página."""
-    page.goto("/")
-    _enter_api_key(page)
+    expect(errors).to_have_count(1)
 
     page.get_by_test_id("question").fill("   ")
     page.get_by_test_id("send").click()
+    expect(errors).to_have_count(2)
 
-    conversation = page.get_by_test_id("answer")
-    expect(conversation).to_contain_text(SPANISH_QUESTION_ERROR)
     expect(page.get_by_test_id("request-id")).to_have_count(0)
 
 
@@ -121,6 +117,18 @@ def test_a_wrong_api_key_shows_an_invalid_key_message(page: Page):
 
     assert response_info.value.status == 401
     expect(page.get_by_test_id("answer")).to_contain_text(INVALID_KEY_MESSAGE)
+
+
+def test_without_a_companion_url_the_header_shows_no_companion_link(page: Page):
+    """Sin ``COMPANION_URL`` la página carga y no muestra el enlace al otro producto.
+
+    La verificación arranca el producto sin ``COMPANION_URL``. La caja de
+    pregunta visible confirma que la página ya cargó antes de buscar el enlace.
+    """
+    page.goto("/")
+
+    expect(page.get_by_test_id("question")).to_be_visible()
+    expect(page.get_by_test_id("companion-link")).to_have_count(0)
 
 
 def test_the_api_key_field_hides_the_key_and_keeps_it_only_in_session_storage(

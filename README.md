@@ -39,6 +39,11 @@ Y solo lo usa quien tiene clave:
   están encendidas sin ocultar entradas y salidas. La lista completa, con dónde está cada regla
   en el código y cómo se comprueba, está en `doc/compliance-checklist.md`.
 
+El encabezado de la página puede enlazar al otro producto, el Asistente de políticas de RH. Con
+`COMPANION_URL`, la página muestra un enlace con el texto de `COMPANION_NAME` que se abre en otra
+pestaña. Si `COMPANION_URL` está vacía, el enlace no aparece. El enlace se arma al arrancar, así
+que para cambiarlo hay que reiniciar el proceso (ADR 0014).
+
 La arquitectura y las decisiones están en `doc/architecture.md` y `doc/adr/`.
 
 ## Cómo correrlo
@@ -93,7 +98,9 @@ docker run --rm -p 8000:8000 --env-file .env hr-assistant
 3. Los secretos (`API_KEYS`, `CF_ACCOUNT_ID`, `CF_API_TOKEN`) se escriben en Render al crear
    el Blueprint (`sync: false`), nunca en el repositorio. `LANGSMITH_API_KEY` se agrega en
    Render > Environment solo si se encienden las trazas.
-4. Si la configuración incumple una regla de compliance, el despliegue falla al arrancar y
+4. `COMPANION_URL` no está en `render.yaml`: cuando exista la URL de Políticas, se escribe a
+   mano en Render > Environment. Mientras no se escriba, la página no muestra el enlace.
+5. Si la configuración incumple una regla de compliance, el despliegue falla al arrancar y
    Render deja viva la versión anterior.
 
 ### Con el modelo real
@@ -177,6 +184,8 @@ arrancar, con un mensaje que nombra la variable. `.env.example` las lista todas,
 | `ENVIRONMENT` | `development` | `development` o `production`; con `production` se aplican las reglas de compliance |
 | `API_KEYS` | (sin valor) | Clientes y claves (secreto), con la forma `cliente:clave,cliente2:clave2` |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Peticiones por cliente por minuto (entero mayor que 0) |
+| `COMPANION_URL` | (sin valor) | URL del otro producto en el encabezado; vacía: sin enlace |
+| `COMPANION_NAME` | `Asistente de políticas de RH` | Texto del enlace al otro producto |
 
 `API_KEYS`:
 
@@ -216,7 +225,7 @@ Desde la raíz del repositorio:
 
 ```bash
 uv run python -m verification unit      # pruebas del producto, cobertura de 80 % o más
-uv run python -m verification contract  # contrato de las sesiones 1 a 4, por HTTP
+uv run python -m verification contract  # contrato de las specs 01 a 05, por HTTP
 uv run python -m verification qa        # pylint, 88 columnas, sin emojis, documentos
 uv run python -m verification e2e       # pruebas de Playwright de la página
 uv run python -m verification evaluate  # misma calidad y menos costo que la línea base

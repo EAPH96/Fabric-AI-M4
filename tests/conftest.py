@@ -13,6 +13,7 @@ clave en cada petición, para que las pruebas de las sesiones 1 a 3 sigan igual.
 import io
 import json
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
@@ -135,6 +136,65 @@ class FakeGateway:
                 },
             }
         return httpx.Response(self.status, json=payload, headers=self.headers)
+
+
+class CompanionLinkParser(HTMLParser):
+    """Lee el HTML y junta los enlaces ``data-testid="companion-link"``.
+
+    De cada enlace guarda sus atributos ya sin escapar, su texto visible y si
+    está dentro de un ``<header>``. Así las pruebas revisan lo que vería el
+    navegador y no el texto crudo del HTML.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self._header_depth = 0
+        self._current = None
+
+    def handle_starttag(self, tag, attrs):
+        """Abre un ``<header>`` o empieza un enlace al otro producto."""
+        if tag == "header":
+            self._header_depth += 1
+        attributes = dict(attrs)
+        if tag == "a" and attributes.get("data-testid") == "companion-link":
+            self._current = {
+                "attrs": attributes,
+                "text": "",
+                "in_header": self._header_depth > 0,
+            }
+
+    def handle_endtag(self, tag):
+        """Cierra el ``<header>`` o termina el enlace en curso."""
+        if tag == "header" and self._header_depth:
+            self._header_depth -= 1
+        if tag == "a" and self._current is not None:
+            self._current["text"] = self._current["text"].strip()
+            self.links.append(self._current)
+            self._current = None
+
+    def handle_data(self, data):
+        """Suma el texto visible del enlace en curso."""
+        if self._current is not None:
+            self._current["text"] += data
+
+
+@pytest.fixture
+def companion_links():
+    """Lector de los enlaces al otro producto que trae una página.
+
+    :return: Función que recibe el HTML y devuelve una lista de diccionarios
+        con ``attrs``, ``text`` e ``in_header``
+    :rtype: collections.abc.Callable
+    """
+
+    def _find(page):
+        parser = CompanionLinkParser()
+        parser.feed(page)
+        parser.close()
+        return parser.links
+
+    return _find
 
 
 @pytest.fixture

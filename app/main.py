@@ -12,6 +12,9 @@ un ``CostMeter`` suma el costo de la respuesta (ADR 0007 y 0009).
 peticiones por cliente; ``/``, ``/health`` y ``/docs`` siguen abiertos (ADR 0010
 y 0011). Con ``ENVIRONMENT=production`` la aplicación no se arma si incumple
 una regla de compliance (ADR 0012).
+
+La página de ``GET /`` se arma una sola vez al arrancar, con el enlace al otro
+producto si ``COMPANION_URL`` tiene valor (ADR 0014).
 """
 
 import os
@@ -34,6 +37,7 @@ from app.observability import (
     build_observability,
     install_middleware,
 )
+from app.page import render_index
 from app.pricing import CostMeter, PriceTable
 from app.ratelimit import RateLimiter
 from app.router import choose_route
@@ -330,8 +334,8 @@ def create_app(
     )
     if observability is None:
         observability = build_observability(settings)
-    index_page = INDEX_FILE.read_text(encoding="utf-8")
-    ask_request = build_ask_request(settings.max_question_chars)
+    index_page = render_index(INDEX_FILE.read_text(encoding="utf-8"), settings.page)
+    ask_request = build_ask_request(settings.page.max_question_chars)
     require_client = build_client_guard(settings, observability)
 
     api = FastAPI(title="HR Assistant")

@@ -14,9 +14,37 @@ def test_default_settings_match_the_specification():
 
     assert settings.model_provider == "fake"
     assert settings.agent_max_steps == 3
-    assert settings.max_question_chars == 2000
+    assert settings.page.max_question_chars == 2000
     expected_path = (PRODUCT_DIR / "data" / "employees.json").resolve()
     assert Path(settings.employees_path).resolve() == expected_path
+
+
+def test_companion_link_defaults_match_the_specification():
+    page = load_settings({}).page
+
+    assert page.companion_url == ""
+    assert page.companion_name == "Asistente de políticas de RH"
+
+
+def test_companion_url_with_only_spaces_counts_as_empty():
+    page = load_settings({"COMPANION_URL": "   "}).page
+
+    assert page.companion_url == ""
+
+
+def test_empty_companion_name_falls_back_to_the_default():
+    page = load_settings(
+        {"COMPANION_URL": "https://politicas.example.com/", "COMPANION_NAME": ""}
+    ).page
+
+    assert page.companion_url == "https://politicas.example.com/"
+    assert page.companion_name == "Asistente de políticas de RH"
+
+
+def test_max_question_chars_is_still_read_from_the_environment():
+    page = load_settings({"MAX_QUESTION_CHARS": "500"}).page
+
+    assert page.max_question_chars == 500
 
 
 def test_observability_defaults_match_the_specification():

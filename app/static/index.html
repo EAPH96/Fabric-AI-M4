@@ -16,9 +16,21 @@
       margin: 0 auto;
       padding: 24px 16px;
     }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 4px;
+    }
     h1 {
       font-size: 1.5rem;
-      margin: 0 0 4px;
+      margin: 0;
+    }
+    .companion-link {
+      font-size: 0.9rem;
+      color: #2f6fde;
     }
     .subtitle {
       margin: 0 0 16px;
@@ -108,7 +120,12 @@
 </head>
 <body>
   <main>
-    <h1>HR Assistant</h1>
+    <!-- El servidor cambia el marcador por el enlace al otro producto al
+         arrancar, o lo borra si no hay COMPANION_URL (ADR 0014). -->
+    <header>
+      <h1>HR Assistant</h1>
+      <!-- COMPANION_LINK -->
+    </header>
     <p class="subtitle">
       Pregunta por un empleado (por ejemplo EMP-0004) o por un departamento.
     </p>

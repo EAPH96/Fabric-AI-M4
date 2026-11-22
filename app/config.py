@@ -54,6 +54,26 @@ SUPPORTED_ENVIRONMENTS = (DEVELOPMENT, PRODUCTION)
 DEFAULT_ENVIRONMENT = DEVELOPMENT
 DEFAULT_RATE_LIMIT_PER_MINUTE = 30
 
+DEFAULT_COMPANION_URL = ""
+DEFAULT_COMPANION_NAME = "Asistente de políticas de RH"
+
+
+@dataclass(frozen=True)
+class PageSettings:
+    """Configuración de la página web y de lo que acepta su formulario.
+
+    :param max_question_chars: Largo máximo de la pregunta
+    :type max_question_chars: int
+    :param companion_url: URL del otro producto; vacía, la página no lo enlaza
+    :type companion_url: str
+    :param companion_name: Texto del enlace al otro producto
+    :type companion_name: str
+    """
+
+    max_question_chars: int = DEFAULT_MAX_QUESTION_CHARS
+    companion_url: str = DEFAULT_COMPANION_URL
+    companion_name: str = DEFAULT_COMPANION_NAME
+
 
 @dataclass(frozen=True)
 class RoutingSettings:
@@ -186,8 +206,8 @@ class Settings:
     :type model_provider: str
     :param agent_max_steps: Tope de vueltas del bucle del agente
     :type agent_max_steps: int
-    :param max_question_chars: Largo máximo de la pregunta
-    :type max_question_chars: int
+    :param page: Largo máximo de la pregunta y enlace al otro producto
+    :type page: PageSettings
     :param employees_path: Ruta absoluta al archivo de empleados
     :type employees_path: pathlib.Path
     :param observability: Configuración de log, métricas y trazas
@@ -200,7 +220,7 @@ class Settings:
 
     model_provider: str = DEFAULT_MODEL_PROVIDER
     agent_max_steps: int = DEFAULT_AGENT_MAX_STEPS
-    max_question_chars: int = DEFAULT_MAX_QUESTION_CHARS
+    page: PageSettings = field(default_factory=PageSettings)
     employees_path: Path = PRODUCT_DIR / DEFAULT_EMPLOYEES_PATH
     observability: ObservabilitySettings = field(
         default_factory=ObservabilitySettings
@@ -509,6 +529,27 @@ def _security(env):
     )
 
 
+def _page(env):
+    """Lee el largo máximo de la pregunta y el enlace al otro producto.
+
+    Una ``COMPANION_URL`` vacía o de solo espacios deja la página sin enlace;
+    un ``COMPANION_NAME`` vacío usa el nombre por omisión.
+
+    :param env: Variables de entorno
+    :type env: collections.abc.Mapping
+    :return: Configuración de la página validada
+    :rtype: PageSettings
+    :raises ConfigError: Si ``MAX_QUESTION_CHARS`` no es un entero positivo
+    """
+    return PageSettings(
+        max_question_chars=_positive_int(
+            env, "MAX_QUESTION_CHARS", DEFAULT_MAX_QUESTION_CHARS
+        ),
+        companion_url=_read(env, "COMPANION_URL", DEFAULT_COMPANION_URL),
+        companion_name=_read(env, "COMPANION_NAME", DEFAULT_COMPANION_NAME),
+    )
+
+
 def load_settings(env: Mapping | None = None) -> Settings:
     """Construye la configuración a partir de variables de entorno.
 
@@ -525,9 +566,7 @@ def load_settings(env: Mapping | None = None) -> Settings:
         agent_max_steps=_positive_int(
             source, "AGENT_MAX_STEPS", DEFAULT_AGENT_MAX_STEPS
         ),
-        max_question_chars=_positive_int(
-            source, "MAX_QUESTION_CHARS", DEFAULT_MAX_QUESTION_CHARS
-        ),
+        page=_page(source),
         employees_path=_existing_file(
             source, "EMPLOYEES_PATH", DEFAULT_EMPLOYEES_PATH
         ),
