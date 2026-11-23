@@ -7,6 +7,10 @@ que no trae ``answer`` ni ``tool`` termina con el mensaje de tope.
 El agente no conoce el log ni LangSmith: recibe un observador opcional que
 envuelve el modelo y las herramientas (trazas) y recibe un aviso por cada
 herramienta ejecutada (auditoría).
+
+El resultado trae ``policy_ids``: los id que el catálogo devolvió en la
+petición, tomados de los objetos del catálogo y no del texto, para validar las
+citas de la respuesta (ADR 0018).
 """
 
 import json
@@ -34,6 +38,9 @@ class AgentResult:
     :param stopped: ``True`` si terminó sin respuesta del modelo (tope agotado
         o salida inválida)
     :type stopped: bool
+    :param policy_ids: Id de las políticas que devolvieron las herramientas,
+        en el orden en que aparecieron y sin repetir; un «not found» no cuenta
+    :type policy_ids: tuple[str, ...]
     """
 
     answer: str
@@ -42,6 +49,7 @@ class AgentResult:
     input_tokens: int = 0
     output_tokens: int = 0
     stopped: bool = False
+    policy_ids: tuple[str, ...] = ()
 
 
 class ToolError(Exception):
@@ -94,6 +102,7 @@ class Agent:  # pylint: disable=too-few-public-methods
         self._complete = self._observer.wrap(model.complete, run_type="llm")
         self._catalog = catalog
         self._max_steps = max_steps
+        self._policy_ids = []
         self._tools = {
             "search_policies": self._observer.wrap(
                 self._search_policies, run_type="tool"
@@ -108,9 +117,11 @@ class Agent:  # pylint: disable=too-few-public-methods
         :type question: str
         :param history: Mensajes previos con ``role`` y ``content``
         :type history: list[dict]
-        :return: Respuesta, pasos, herramientas usadas, tokens y si se detuvo
+        :return: Respuesta, pasos, herramientas usadas, tokens, si se detuvo y
+            las políticas devueltas por las herramientas
         :rtype: AgentResult
         """
+        self._policy_ids = []
         messages = [
             {"role": message["role"], "content": message["content"]}
             for message in history
@@ -140,7 +151,19 @@ class Agent:  # pylint: disable=too-few-public-methods
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             stopped=answer is None,
+            policy_ids=tuple(self._policy_ids),
         )
+
+    def _record_policies(self, policies):
+        """Anota los id de las políticas que devolvió el catálogo, sin repetir.
+
+        :param policies: Políticas del catálogo, cada una con su ``id``
+        :type policies: list[dict]
+        """
+        for policy in policies:
+            policy_id = policy.get("id")
+            if isinstance(policy_id, str) and policy_id not in self._policy_ids:
+                self._policy_ids.append(policy_id)
 
     def _call_tool(self, name, args, tools_used):
         """Ejecuta una herramienta del registro y devuelve su resultado como texto.
@@ -187,6 +210,7 @@ class Agent:  # pylint: disable=too-few-public-methods
         policies = self._catalog.search(topic)
         if not policies:
             return f"No policies found for topic {topic}"
+        self._record_policies(policies)
         return json.dumps(policies, ensure_ascii=False)
 
     def _get_policy(self, policy_id):
@@ -204,6 +228,7 @@ class Agent:  # pylint: disable=too-few-public-methods
         policy = self._catalog.get_policy(policy_id)
         if policy is None:
             return f"Policy {policy_id} not found"
+        self._record_policies([policy])
         return json.dumps(policy, ensure_ascii=False)
 
 

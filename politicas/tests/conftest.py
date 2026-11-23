@@ -254,33 +254,44 @@ def make_client(clock, log_stream):
 
     Los modelos se construyen con ``build_models``: con ``MODEL_PROVIDER=fake``
     son los simulados y con ``gateway`` usan el ``http_client`` de la prueba
-    (un ``httpx.MockTransport``, nunca la red). Si la prueba no pasa
-    ``API_KEYS``, se configura el cliente ``tests`` con ``TEST_API_KEY``.
+    (un ``httpx.MockTransport``, nunca la red). Si la prueba pasa un
+    ``model``, ese modelo atiende las dos rutas; si pasa un ``tracer`` (por
+    ejemplo un espía), se usa en lugar del ``NullTracer``. Si la prueba no
+    pasa ``API_KEYS``, se configura el cliente ``tests`` con ``TEST_API_KEY``.
 
     :param clock: Reloj de prueba
     :type clock: FakeClock
     :param log_stream: Destino del log
     :type log_stream: io.StringIO
     :return: Función que recibe un cliente HTTP opcional, la clave que se
-        manda y variables de entorno, y devuelve un ``TestClient``
+        manda, un modelo y un tracer opcionales y variables de entorno, y
+        devuelve un ``TestClient``
     :rtype: collections.abc.Callable
     """
 
-    def _make(http_client=None, api_key=TEST_API_KEY, **env):
+    def _make(
+        http_client=None, api_key=TEST_API_KEY, model=None, tracer=None, **env
+    ):
         env.setdefault("API_KEYS", f"{TEST_CLIENT}:{TEST_API_KEY}")
         settings = load_settings(env)
         policies = PolicyCatalog(settings.policies_path)
-        models = build_models(settings, policies, http_client=http_client)
+        models = None
+        if model is None:
+            models = build_models(settings, policies, http_client=http_client)
         logger = JsonLogger(
             stream=log_stream,
             clock=clock,
             service=settings.observability.service_name,
         )
         observability = Observability(
-            clock=clock, logger=logger, metrics=Metrics(), tracer=NullTracer()
+            clock=clock,
+            logger=logger,
+            metrics=Metrics(),
+            tracer=NullTracer() if tracer is None else tracer,
         )
         app = create_app(
             settings=settings,
+            model=model,
             catalog=policies,
             observability=observability,
             models=models,

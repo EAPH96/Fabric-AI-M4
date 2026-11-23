@@ -17,7 +17,8 @@ El modelo vive detrás de una interfaz: puede ser simulado y determinista (`fake
 (`gateway`: Cloudflare Workers AI a través de AI Gateway). El simulado pide `get_policy` si la
 pregunta trae un id como `POL-003`, `search_policies` si menciona un tema o una palabra clave de
 alguna política, y si no, responde «Pregúntame por una política (POL-001) o un tema, como
-vacaciones.».
+vacaciones.». Como esa ayuda cita `POL-001` sin haberla consultado, la validación de citas la
+reemplaza por el texto de «no encontré» (ver «Citas de políticas», más abajo).
 
 Vive en `product/politicas/`, en el mismo repositorio que el HR Assistant, y se publica como un
 servicio aparte. No importa nada de `product/app/`: los módulos que son iguales se copiaron, así
@@ -29,21 +30,30 @@ Todo lo demás es igual al HR Assistant:
   (`MODEL_SMALL`) o al capaz (`MODEL_LARGE`), ventana de historial (`HISTORY_WINDOW`), tope de
   salida (`MODEL_MAX_TOKENS`) y caché de AI Gateway (`CACHE_TTL_SECONDS`).
 - **Observabilidad**: un `request_id` por petición (encabezado `X-Request-ID`, cuerpo de
-  `POST /ask` y página), log JSON en la salida estándar con `service: politicas-rh` (sin el texto
-  de preguntas ni respuestas), `GET /metrics` (con métricas de negocio: respuestas y costo por
-  modelo, llamadas de la caché, respuestas cortadas por el tope, usos de cada herramienta y
-  peticiones por clase de código) y trazas opcionales en LangSmith, en el proyecto
-  `LANGSMITH_PROJECT`.
+  `POST /ask` y página), log JSON en la salida estándar con `service: politicas-rh` (eventos
+  `request`, `agent_run`, `audit`, `error`, `auth_failed`, `rate_limited` y `pii_detected`, sin
+  el texto de preguntas ni respuestas), `GET /metrics` (con métricas de negocio: respuestas y
+  costo por modelo, llamadas de la caché, respuestas cortadas por el tope, usos de cada
+  herramienta y peticiones por clase de código) y trazas opcionales en LangSmith, en el
+  proyecto `LANGSMITH_PROJECT`.
 - **Acceso**: una clave por cliente (`API_KEYS`, encabezado `X-API-Key`), límite por cliente
   (`RATE_LIMIT_PER_MINUTE`, `429` con `Retry-After`) y compliance como código con
   `ENVIRONMENT=production`. Las reglas son las de `../doc/compliance-checklist.md` del HR
-  Assistant.
+  Assistant; las de la especificación 09 están en `doc/compliance-checklist.md`.
+- **Datos personales enmascarados**: CURP, RFC, correo, CLABE, tarjeta, NSS y teléfono se
+  reemplazan por una marca (`[CURP]`, `[RFC]`, `[CORREO]`, `[CLABE]`, `[TARJETA]`, `[NSS]`,
+  `[TELEFONO]`) en la pregunta y el historial antes de llegar al modelo, al gateway (y su caché)
+  y a la traza, y en la respuesta antes de devolverla. La pregunta no se rechaza por traer un
+  dato personal.
+- **Auditoría de rechazos**: cada `401` deja un `auth_failed`, cada `429` un `rate_limited` y
+  cada enmascaramiento un `pii_detected`, sin la clave ni el valor detectado.
 - **Enlace al otro producto**: con `COMPANION_URL`, el encabezado de la página enlaza al HR
   Assistant (texto de `COMPANION_NAME`), en otra pestaña. Sin `COMPANION_URL`, no hay enlace. Se
   arma al arrancar: para cambiarlo hay que reiniciar el proceso.
 
 La arquitectura y las decisiones propias están en `doc/architecture.md` y `doc/adr/`; las
-heredadas, en los ADR 0001 a 0014 del HR Assistant (`../doc/adr/`).
+heredadas, en los ADR 0001 a 0014 del HR Assistant (`../doc/adr/`), y la de datos personales,
+citas y auditoría en su ADR 0018.
 
 ## Cómo correrlo
 
@@ -143,16 +153,35 @@ sin reintentar.
 | `GET /` | No | Página web para el personal |
 | `GET /health` | No | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | No | Documentación interactiva de la API, con el título «Asistente de políticas de RH» |
-| `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
+| `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls`, `cost_usd` y `pii_masked` |
 | `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado, `by_model` (por modelo: `requests` y `cost_usd`), `cached_calls`, `stopped`, `tools` (veces que se ejecutó cada herramienta) y `status` (`2xx`, `4xx`, `5xx`; suman `requests`) |
 
 Las rutas con clave piden `X-API-Key` y cuentan en el límite del cliente:
 
-- Sin clave o con una que no es de ningún cliente: `401 {"detail": "invalid or missing API key"}`.
-  Los `401` no cuentan en el límite.
+- Sin clave o con una que no es de ningún cliente: `401 {"detail": "invalid or missing API key"}`
+  y un `auth_failed` en el log. Los `401` no cuentan en el límite.
 - Más de `RATE_LIMIT_PER_MINUTE` peticiones del mismo cliente en los últimos 60 segundos:
-  `429 {"detail": "rate limit exceeded"}` con `Retry-After` (segundos que faltan, al menos 1).
-  El límite es por cliente y por proceso: con varias copias, cada una cuenta por su lado.
+  `429 {"detail": "rate limit exceeded"}` con `Retry-After` (segundos que faltan, al menos 1) y
+  un `rate_limited` en el log. El límite es por cliente y por proceso: con varias copias, cada
+  una cuenta por su lado.
+
+Datos personales en `POST /ask`:
+
+- `pii_masked`: los tipos de dato personal que se enmascararon en la pregunta, el historial o
+  la respuesta (`card`, `clabe`, `curp`, `email`, `nss`, `phone`, `rfc`), ordenados y sin
+  repetir. Nunca lleva los valores. Sin datos personales es una lista vacía.
+- La respuesta ya trae las marcas en lugar de los valores, por ejemplo
+  `Escribe a [CORREO] para más detalles`.
+- Un id como `POL-003` o una fecha como `2019-03-04` no es un dato personal.
+
+### Citas de políticas
+
+Solo se cita una política que devolvió una herramienta (`search_policies` o `get_policy`) en la
+misma petición. Si la respuesta cita un `POL-` seguido de 3 dígitos que ninguna herramienta
+devolvió, la respuesta completa se reemplaza por «No encontré esa información en las políticas.
+Pregunta por una política (POL-001) o un tema, como vacaciones.». Un «Policy POL-999 not found»
+no cuenta como devuelto, ni una política que solo viene en el historial. Una respuesta sin citas
+no cambia. La validación corre antes de enmascarar los datos personales de la respuesta.
 
 Campos de costo de `POST /ask`:
 
@@ -245,8 +274,14 @@ puede servir el texto viejo de una política mientras dure `CACHE_TTL_SECONDS`.
 - Trazas: el proyecto `LANGSMITH_PROJECT` de LangSmith, solo si se encendieron con
   `LANGSMITH_TRACING=true` y clave. Cada traza lleva el `request_id` y el cliente en sus
   metadatos.
-- Quién pregunta: los eventos `request` (con clave válida), `agent_run` y `audit` traen el campo
-  `client` con el nombre del cliente, nunca su clave.
+- Quién pregunta: los eventos `request` (con clave válida), `agent_run`, `audit`,
+  `rate_limited` y `pii_detected` traen el campo `client` con el nombre del cliente, nunca su
+  clave.
+- Accesos rechazados: `auth_failed` con `reason` (`missing` sin clave o con una vacía,
+  `invalid` si la clave no es de nadie) y `rate_limited` con `client` y `retry_after` (los
+  segundos de `Retry-After`).
+- Datos personales: `pii_detected` con `where` (`question`, `history` o `answer`) y `types`
+  (los tipos enmascarados), nunca el valor.
 
 ## Pruebas
 

@@ -19,18 +19,18 @@ Feature: Ask the HR policies assistant
     And the answer mentions "POL-001"
     And the tools used are "search_policies"
 
-  Scenario: Asking for an unknown policy still gets an answer
+  Scenario: Asking for an unknown policy gets the not found text
     Given the assistant is running with the default settings
     When I ask "¿Qué dice la política POL-999?"
     Then the response status is 200
-    And the answer mentions "POL-999"
-    And the answer mentions "not found"
+    And the answer is "No encontré esa información en las políticas. Pregunta por una política (POL-001) o un tema, como vacaciones."
+    And the tools used are "get_policy"
 
-  Scenario: A question without a policy id or a topic gets help
+  Scenario: A question without a policy id or a topic gets the not found text
     Given the assistant is running with the default settings
     When I ask "¿Qué tal el clima hoy?"
     Then the response status is 200
-    And the answer is "Pregúntame por una política (POL-001) o un tema, como vacaciones."
+    And the answer is "No encontré esa información en las políticas. Pregunta por una política (POL-001) o un tema, como vacaciones."
     And no tools were used
 
   Scenario: The home page shows the legal notice and links to the HR Assistant

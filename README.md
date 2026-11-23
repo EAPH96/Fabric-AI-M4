@@ -22,8 +22,9 @@ Cada petición se puede rastrear y medir:
 - Un `request_id` por petición: se respeta el encabezado `X-Request-ID` del cliente (1 a 128
   caracteres de `A-Z a-z 0-9 . _ : -`) o se genera un UUID. Toda respuesta lo devuelve en
   `X-Request-ID`; `POST /ask` también en el cuerpo, y la página lo muestra bajo cada respuesta.
-- Log en JSON, una línea por evento, en la salida estándar: `request`, `agent_run`, `audit` y
-  `error`. Nunca se registra el texto de preguntas ni respuestas, ni el mensaje de un error.
+- Log en JSON, una línea por evento, en la salida estándar: `request`, `agent_run`, `audit`,
+  `error`, `auth_failed`, `rate_limited` y `pii_detected`. Nunca se registra el texto de
+  preguntas ni respuestas, ni el mensaje de un error, ni una clave, ni un dato personal.
 - `GET /metrics` con las métricas de este proceso y si se cumple la meta de latencia p95, más
   las métricas de negocio: respuestas y costo por modelo, llamadas de la caché, respuestas
   cortadas por el tope de pasos, usos de cada herramienta y peticiones por clase de código.
@@ -40,6 +41,12 @@ Y solo lo usa quien tiene clave:
   modelo simulado, si no hay claves o alguna tiene menos de 16 caracteres, o si las trazas
   están encendidas sin ocultar entradas y salidas. La lista completa, con dónde está cada regla
   en el código y cómo se comprueba, está en `doc/compliance-checklist.md`.
+- **Datos personales enmascarados**: CURP, RFC, correo, CLABE, tarjeta, NSS y teléfono se
+  reemplazan por una marca (`[CURP]`, `[RFC]`, `[CORREO]`, `[CLABE]`, `[TARJETA]`, `[NSS]`,
+  `[TELEFONO]`) en la pregunta y el historial antes de llegar al modelo y a la traza, y en la
+  respuesta antes de devolverla. La pregunta no se rechaza por traer un dato personal.
+- **Auditoría de rechazos**: cada `401` deja un `auth_failed`, cada `429` un `rate_limited` y
+  cada enmascaramiento un `pii_detected`, sin la clave ni el valor detectado.
 
 El encabezado de la página puede enlazar al otro producto, el Asistente de políticas de RH. Con
 `COMPANION_URL`, la página muestra un enlace con el texto de `COMPANION_NAME` que se abre en otra
@@ -125,16 +132,17 @@ sin reintentar.
 | `GET /` | No | Página web para el personal de RH |
 | `GET /health` | No | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | No | Documentación interactiva de la API |
-| `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
+| `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls`, `cost_usd` y `pii_masked` |
 | `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado, `by_model` (por modelo: `requests` y `cost_usd`), `cached_calls`, `stopped`, `tools` (veces que se ejecutó cada herramienta) y `status` (`2xx`, `4xx`, `5xx`; suman `requests`) |
 
 Las rutas con clave piden `X-API-Key` y cuentan en el límite del cliente:
 
-- Sin clave o con una que no es de ningún cliente: `401 {"detail": "invalid or missing API key"}`.
-  Los `401` no cuentan en el límite.
+- Sin clave o con una que no es de ningún cliente: `401 {"detail": "invalid or missing API key"}`
+  y un `auth_failed` en el log. Los `401` no cuentan en el límite.
 - Más de `RATE_LIMIT_PER_MINUTE` peticiones del mismo cliente en los últimos 60 segundos:
-  `429 {"detail": "rate limit exceeded"}` con `Retry-After` (segundos que faltan, al menos 1).
-  El límite es por cliente y por proceso: con varias copias, cada una cuenta por su lado.
+  `429 {"detail": "rate limit exceeded"}` con `Retry-After` (segundos que faltan, al menos 1) y
+  un `rate_limited` en el log. El límite es por cliente y por proceso: con varias copias, cada
+  una cuenta por su lado.
 
 Campos de costo de `POST /ask`:
 
@@ -146,6 +154,15 @@ Campos de costo de `POST /ask`:
 - `cost_usd`: costo estimado en USD con los precios de `PRICES_PATH` (por millón de tokens), sin
   redondear. Las llamadas cacheadas no cuestan, pero sus tokens sí se cuentan. Es una estimación,
   no la factura: actualiza `data/model_prices.json` cuando cambien los precios.
+
+Datos personales en `POST /ask`:
+
+- `pii_masked`: los tipos de dato personal que se enmascararon en la pregunta, el historial o
+  la respuesta (`card`, `clabe`, `curp`, `email`, `nss`, `phone`, `rfc`), ordenados y sin
+  repetir. Nunca lleva los valores. Sin datos personales es una lista vacía.
+- La respuesta ya trae las marcas en lugar de los valores, por ejemplo
+  `Escribe a [CORREO] para más detalles`.
+- Un id como `EMP-0004` o una fecha como `2019-03-04` no es un dato personal.
 
 El modelo simulado también tiene precio: hay dos simulados que se llaman como `MODEL_SMALL` y
 `MODEL_LARGE`, responden igual y cuestan lo que dice el precio de su nombre. Así las palancas se
@@ -221,8 +238,14 @@ datos de empleados y puede servir datos viejos mientras dure `CACHE_TTL_SECONDS`
   `cost_usd` (sin el texto de la pregunta ni de la respuesta).
 - Trazas: el proyecto de LangSmith, solo si se encendieron con `LANGSMITH_TRACING=true` y clave.
   Cada traza lleva el `request_id` y el cliente en sus metadatos.
-- Quién pregunta: los eventos `request` (con clave válida), `agent_run` y `audit` traen el campo
-  `client` con el nombre del cliente, nunca su clave.
+- Quién pregunta: los eventos `request` (con clave válida), `agent_run`, `audit`,
+  `rate_limited` y `pii_detected` traen el campo `client` con el nombre del cliente, nunca su
+  clave.
+- Accesos rechazados: `auth_failed` con `reason` (`missing` sin clave o con una vacía,
+  `invalid` si la clave no es de nadie) y `rate_limited` con `client` y `retry_after` (los
+  segundos de `Retry-After`).
+- Datos personales: `pii_detected` con `where` (`question`, `history` o `answer`) y `types`
+  (los tipos enmascarados), nunca el valor.
 
 ## Pruebas
 

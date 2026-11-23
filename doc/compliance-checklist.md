@@ -32,8 +32,27 @@ cliente y el largo de la clave, nunca su valor.
 | La página guarda la clave solo en `sessionStorage` (nunca en el almacenamiento persistente ni en el HTML) y la manda en `X-API-Key` | `app/static/index.html`, `currentApiKey` y `ask` | `tests/test_main.py`, `test_home_page_asks_for_the_key_and_keeps_it_only_for_the_session`; pruebas e2e de `e2e/test_chat_page.py` |
 | La página muestra «Clave inválida» con `401` y «Demasiadas preguntas; espera N segundos» con `429` | `app/static/index.html`, `errorMessage` y `rateLimitMessage` | `tests/test_main.py`; prueba e2e `test_a_wrong_api_key_shows_an_invalid_key_message` |
 
+## Datos personales y auditoría (especificación 09)
+
+Valen en todo entorno y no se pueden apagar (ADR 0018). El valor de un dato personal o de una clave nunca se
+escribe en el log, la traza, las métricas ni la respuesta: solo su tipo o el motivo. Los escenarios están en
+`tests/features/privacy.feature`; los contratos, en `verification/contract/test_contract_09.py`.
+
+| Control | Dónde está en el código | Cómo se comprueba |
+| --- | --- | --- |
+| Se detectan CURP, RFC, correo, CLABE, tarjeta, NSS y teléfono solo con `re`, en ese orden, con sus marcas y con límites de palabra; cada coincidencia se reemplaza por su marca antes de buscar el siguiente tipo | `app/pii.py`, `PII_RULES` y `mask_pii` | `tests/test_pii.py`: `test_rules_follow_the_order_and_marks_of_the_specification`, `test_every_type_is_replaced_by_its_mark`, `test_a_card_is_masked_with_spaces_dashes_or_no_separators`, `test_a_phone_is_masked_with_spaces_or_dashes` |
+| Una CURP no cuenta también como RFC, ni una CLABE como tarjeta o teléfono; `EMP-0004`, `POL-003` y una fecha no son PII | `app/pii.py`, `PII_RULES` (orden y `\b`) | `tests/test_pii.py`: `test_a_curp_is_not_also_counted_as_an_rfc`, `test_a_clabe_is_not_counted_as_a_card_or_a_phone`, `test_ids_and_dates_are_not_personal_data` |
+| La pregunta y cada mensaje del historial se enmascaran antes del enrutador, el modelo, las herramientas y la traza; la pregunta con PII no se rechaza (`200`) | `app/main.py`, `ask` | Escenarios «A question with a CURP and an email is masked before the model» y «A phone number in the history is masked before the model» (el modelo espía no recibe el valor) |
+| La respuesta se enmascara antes de devolverla, dentro de la traza `chain` | `app/main.py`, `ask` | Escenarios «An email in the answer is masked before it is returned» y «The chain trace only sees the masked question and the masked answer» |
+| `AskResponse.pii_masked` lista los tipos enmascarados en pregunta, historial y respuesta, ordenados y sin repetir; nunca los valores; vacía si no hubo PII | `app/main.py`, `AskResponse` y `ask`; `app/pii.py`, `mask_pii` | `tests/test_pii.py`, `test_types_are_sorted_and_never_repeated`; escenarios «Personal data in the question, the history and the answer is reported once per place» y «A question without personal data is not changed»; contrato `test_personal_data_is_masked_and_never_logged` |
+| Un `pii_detected` por cada lugar con PII, con `where` (`question`, `history` o `answer`) y `types`, nunca el valor | `app/main.py`, `log_pii` | Escenario «Personal data in the question, the history and the answer is reported once per place»; contrato `test_personal_data_is_masked_and_never_logged` (ninguna línea del log contiene la CURP ni el correo) |
+| `auth_failed` por cada `401`: `reason` `missing` sin encabezado o con encabezado vacío, `invalid` si la clave no es de nadie; nunca la clave ni una parte | `app/main.py`, `build_client_guard` | Escenarios «Asking without a key is audited as missing», «Asking with an empty key is audited as missing» y «Asking with a wrong key is audited as invalid and the key is never logged»; contrato `test_rejected_keys_are_audited_without_the_key` |
+| `rate_limited` con `client` y `retry_after` por cada `429` | `app/main.py`, `build_client_guard` | Escenario «Passing the limit is audited with the client and the seconds to wait»; contrato `test_the_rate_limit_is_audited` |
+
 ## Cómo revisarlo a mano
 
 1. Desde la raíz del repositorio: `uv run python -m verification unit` y `uv run python -m verification contract`.
 2. Para ver una regla fallar, arranca con `ENVIRONMENT=production` y `MODEL_PROVIDER=fake`: el proceso termina con
    `production compliance failed: MODEL_PROVIDER must not be 'fake' in production`.
+3. Para ver la PII enmascarada, pregunta «Mi correo es ana.prueba@ejemplo.com, ¿quién es EMP-0004?» con una clave
+   válida: la respuesta trae `pii_masked: ["email"]`, el log tiene `pii_detected` y no contiene el correo.

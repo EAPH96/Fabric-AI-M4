@@ -14,7 +14,10 @@ Desde la especificación 07, `/metrics` también dice cómo se usa el producto y
 modelo: respuestas y costo por modelo, llamadas de caché, respuestas cortadas, herramientas y clases
 de código HTTP (ADR 0015 y 0016), igual en los dos productos. Desde la especificación 08, la
 configuración de producción de `render.yaml` manda todas las preguntas al modelo grande en los dos
-servicios y enciende la caché del gateway solo en Políticas (ADR 0017); el código no cambia.
+servicios y enciende la caché del gateway solo en Políticas (ADR 0017); el código no cambia. Desde la
+especificación 09, los datos personales de la pregunta, el historial y la respuesta se enmascaran
+con `app/pii.py`, la respuesta dice qué tipos se enmascararon (`pii_masked`) y el log audita los
+rechazos de clave, los de límite y la PII, nunca sus valores (ADR 0018).
 
 ## Componentes
 
@@ -28,11 +31,12 @@ flowchart LR
     MW --> M["API<br/>app/main.py<br/>/, /health, /docs abiertos<br/>/ask, /metrics con clave"]
     C --> CO["Compliance<br/>app/compliance.py<br/>al arrancar"]
     CO --> M
-    M -- "dependencia de cliente" --> AU["ApiKeyAuth<br/>app/security.py<br/>401"]
-    AU -- "cliente" --> RL["RateLimiter<br/>app/ratelimit.py<br/>429 + Retry-After"]
+    M -- "dependencia de cliente" --> AU["ApiKeyAuth<br/>app/security.py<br/>401 + auth_failed"]
+    AU -- "cliente" --> RL["RateLimiter<br/>app/ratelimit.py<br/>429 + Retry-After + rate_limited"]
     CLK["Clock<br/>app/clock.py"] --> RL
     CLK --> MW
-    M -- "Route(model, reason)" --> R["Enrutador<br/>app/router.py"]
+    M -- "pregunta, historial y respuesta" --> PII["mask_pii<br/>app/pii.py<br/>solo re, 7 tipos"]
+    M -- "Route(model, reason)<br/>con texto enmascarado" --> R["Enrutador<br/>app/router.py"]
     M -- "un Agent, un RequestObserver con cliente<br/>y un CostMeter por petición" --> A["Agente<br/>app/agent.py"]
     A -- "complete(messages)" --> CM["CostMeter<br/>app/pricing.py"]
     CM --> L["Modelos<br/>app/llm.py"]
@@ -42,7 +46,7 @@ flowchart LR
     A -- "herramientas" --> D["Directorio<br/>app/directory.py"]
     D --> J[("data/employees.json")]
     MW -- "request (con client)" --> LOG["JsonLogger<br/>app/logs.py"]
-    M -- "agent_run (con client)" --> LOG
+    M -- "agent_run, pii_detected,<br/>auth_failed, rate_limited" --> LOG
     A -- "audit (con client)" --> LOG
     LOG --> OUT[("stdout")]
     MW -- "record_request: requests,<br/>latencia, status" --> MET["Metrics<br/>app/metrics.py<br/>un candado"]
@@ -59,6 +63,7 @@ sequenceDiagram
     participant MW as Middleware
     participant DEP as Dependencia de cliente
     participant API as main.py
+    participant PII as pii.py
     participant AG as Agent y CostMeter
     participant LOG as JsonLogger
     participant MET as Metrics
@@ -66,20 +71,28 @@ sequenceDiagram
     MW->>MW: resuelve request_id, inicia reloj
     MW->>DEP: petición
     alt sin clave o clave inválida
+        DEP->>LOG: auth_failed (reason missing o invalid, nunca la clave)
         DEP-->>MW: 401 invalid or missing API key
     else clave válida
         DEP->>DEP: request.state.client = cliente
         alt pasó el límite del minuto
+            DEP->>LOG: rate_limited (client, retry_after)
             DEP-->>MW: 429 rate limit exceeded con Retry-After
         else dentro del límite
             DEP->>API: cliente
-            API->>API: valida cuerpo (422), enruta, recorta historial
-            API->>AG: run(question, history) con observador del cliente
+            API->>API: valida cuerpo (422), recorta historial
+            API->>PII: mask_pii(pregunta) y mask_pii(cada mensaje)
+            PII-->>API: texto con marcas y tipos
+            API->>LOG: pii_detected (where question o history, types)
+            API->>API: enruta con el texto enmascarado
+            API->>AG: run(pregunta, historial) enmascarados, traza chain
             AG->>LOG: audit (tool, args, client)
             AG-->>API: resultado y costo
+            API->>PII: mask_pii(respuesta), dentro de la traza
+            API->>LOG: pii_detected (where answer) si hubo
             API->>LOG: agent_run (conteos, costo, client)
             API->>MET: tokens y record_answer (solo con 200)
-            API-->>MW: 200 (o 502 si el gateway falla)
+            API-->>MW: 200 con pii_masked (o 502 si el gateway falla)
         end
     end
     MW->>MET: record_request (requests, latencia, status por clase)
@@ -88,10 +101,44 @@ sequenceDiagram
     WEB->>WEB: 401 Clave inválida, 429 espera N segundos
 ```
 
+## Datos personales y auditoría
+
+Desde la especificación 09 (ADR 0018). `app/pii.py` es el único lugar que conoce los patrones; `main.py` es el
+único que lo llama, porque todo el texto de una petición pasa por ahí. El valor detectado nunca sale de `mask_pii`:
+eventos, trazas, métricas y respuesta solo llevan el tipo.
+
+```mermaid
+flowchart LR
+    Q["question"] --> MK["mask_pii<br/>curp, rfc, email, clabe,<br/>card, nss, phone<br/>en ese orden, con límites de palabra"]
+    H["history<br/>después de la ventana"] --> MK
+    MK -- "texto con marcas<br/>[CURP], [CORREO]..." --> AG["Enrutador, agente, modelo,<br/>gateway y traza chain"]
+    AG --> ANS["answer"]
+    ANS --> MK2["mask_pii"]
+    MK2 --> RESP["AskResponse<br/>answer enmascarada<br/>pii_masked: tipos ordenados"]
+    MK -- "where question / history, types" --> EV["pii_detected"]
+    MK2 -- "where answer, types" --> EV
+    G["require_client"] -- "401" --> AF["auth_failed<br/>reason: missing o invalid"]
+    G -- "429" --> RLD["rate_limited<br/>client, retry_after"]
+    EV --> LOG[("Log JSON<br/>sin valores ni claves")]
+    AF --> LOG
+    RLD --> LOG
+```
+
+| Tipo | Marca | Tipo | Marca |
+| --- | --- | --- | --- |
+| `curp` | `[CURP]` | `card` | `[TARJETA]` |
+| `rfc` | `[RFC]` | `nss` | `[NSS]` |
+| `email` | `[CORREO]` | `phone` | `[TELEFONO]` |
+| `clabe` | `[CLABE]` | | |
+
+La pregunta con PII no se rechaza. Las trazas `llm` guardan el texto del modelo, que solo recibió texto
+enmascarado; en producción, con trazas encendidas, compliance exige ocultar entradas y salidas (ADR 0006 y 0012).
+
 ## Métricas de negocio
 
 Los cinco campos de la especificación 07 viven en `Metrics`, bajo el mismo candado que `requests`,
-latencia, tokens y costo (ADR 0015). Cada uno se suma en un solo punto (ADR 0016).
+latencia, tokens y costo (ADR 0015). Cada uno se suma en un solo punto (ADR 0016). La especificación
+09 no agrega métricas.
 
 ```mermaid
 flowchart TB
@@ -144,7 +191,8 @@ sequenceDiagram
 
 Un solo proceso uvicorn por copia. Lo que se escribe entre peticiones lleva candado; lo demás es de
 solo lectura o vive solo durante una petición (ADR 0013). Las métricas de negocio no agregan otro
-objeto compartido: van dentro de `Metrics` (ADR 0015).
+objeto compartido: van dentro de `Metrics` (ADR 0015). Los patrones de `pii.py` se compilan una vez y
+son de solo lectura.
 
 ```mermaid
 flowchart TB
@@ -166,6 +214,7 @@ flowchart TB
             DIR["Directorio"]
             PRI["PriceTable"]
             AUTH["ApiKeyAuth"]
+            PIIR["PII_RULES"]
             TRC["Tracer y cliente de LangSmith"]
             MOD["Modelos y httpx.Client"]
         end
@@ -250,14 +299,18 @@ agrega a mano en Render > Environment del HR.
   producción el enrutamiento está apagado en los dos servicios y la caché del gateway solo se usa en
   Políticas; el código del enrutador se conserva para una medición futura (ADR 0017).
 - Una clave por cliente en una dependencia de ruta; la clave nunca se escribe, solo el nombre del
-  cliente (ADR 0010).
-- Límite por cliente en memoria con reloj inyectado; con varias copias se multiplica (ADR 0011).
+  cliente (ADR 0010). Un rechazo deja `auth_failed` con su motivo (ADR 0018).
+- Límite por cliente en memoria con reloj inyectado; con varias copias se multiplica (ADR 0011). Un
+  rechazo deja `rate_limited` con el cliente y la espera (ADR 0018).
 - Compliance al arrancar con `ENVIRONMENT=production`; publicación solo con aprobación humana y CI en
   verde (ADR 0012). Detalle en `doc/compliance-checklist.md`.
 - Peticiones simultáneas en el pool de hilos de FastAPI; solo métricas, log y límite se comparten y
   escriben, con candado (ADR 0013).
 - El enlace al otro producto se arma en el servidor al arrancar, escapado y en otra pestaña; sin
   `COMPANION_URL` no aparece (ADR 0014).
+- Datos personales detectados solo con `re` en `app/pii.py` y enmascarados en `main.py` antes del
+  enrutador, el agente y la traza, y en la respuesta antes de devolverla; nunca se rechaza la pregunta
+  ni se registra el valor (ADR 0018).
 - Políticas no importa nada de `app/`: copia sus módulos y se construye con su propia carpeta; un
   fallo de sus etapas de CI también frena la publicación del HR (ADR 0001 y 0002 de Políticas).
 - Inyección de dependencias en `create_app(settings, model, directory, observability, models)`; la
@@ -279,18 +332,22 @@ agrega a mano en Render > Environment del HR.
 | `COMPANION_NAME` | `Asistente de políticas de RH` | `page.py`; texto del enlace |
 
 La especificación 07 no agrega variables. La especificación 08 tampoco: fija en `render.yaml` el valor
-de producción de `ROUTING` y `CACHE_TTL_SECONDS` (tabla de «Configuración de producción»).
+de producción de `ROUTING` y `CACHE_TTL_SECONDS` (tabla de «Configuración de producción»). La
+especificación 09 tampoco: el enmascaramiento y la auditoría siempre están encendidos.
 
 ## Dónde mirar
 
 - Log: la salida estándar del proceso (en Render, la pestaña Logs); se filtra por `request_id` o por
-  `client`.
+  `client`. Los rechazos se buscan por `auth_failed` (`reason`) y `rate_limited` (`client`,
+  `retry_after`); la PII enmascarada, por `pii_detected` (`where`, `types`).
 - Métricas: `GET /metrics` con una clave; el `pid` dice de qué copia vienen. Uso y costo por modelo en
   `by_model`, herramientas en `tools`, respuestas cortadas en `stopped`, caché en `cached_calls` y
   clases de código en `status`. En producción `by_model` solo muestra `MODEL_LARGE`, `cached_calls`
   queda en 0 en el HR y la latencia del modelo grande se vigila con `latency_ms` y `slo`.
-- Respuestas de `/ask` en producción: `route` es `routing_disabled` y `model` es `MODEL_LARGE`.
+- Respuestas de `/ask` en producción: `route` es `routing_disabled` y `model` es `MODEL_LARGE`;
+  `pii_masked` lista los tipos enmascarados.
 - Configuración de producción: `render.yaml`; la comprueba `verification/contract/test_contract_08.py`.
+- PII y auditoría: `verification/contract/test_contract_09.py`; controles en `doc/compliance-checklist.md`.
 - Documentación de la API: Swagger en `/docs`, abierto sin clave, con «Authorize» para `X-API-Key`.
 - Pipeline: la pestaña Actions del repositorio, una etapa por trabajo; las de Políticas terminan en
   `-politicas`.

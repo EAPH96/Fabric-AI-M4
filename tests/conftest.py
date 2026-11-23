@@ -282,17 +282,22 @@ def make_client(clock, log_stream):
     Si la prueba no pasa ``API_KEYS``, se configura el cliente ``tests`` con
     ``TEST_API_KEY``. El ``TestClient`` manda ``api_key`` en ``X-API-Key`` en
     cada petición; con ``api_key=None`` no manda ningún encabezado de clave.
+    Si la prueba pasa un ``tracer`` (por ejemplo un espía), se usa en lugar
+    del ``NullTracer``.
 
     :param clock: Reloj de prueba
     :type clock: FakeClock
     :param log_stream: Destino del log
     :type log_stream: io.StringIO
     :return: Función que recibe un modelo opcional, un cliente HTTP opcional,
-        la clave que se manda y variables de entorno, y devuelve un ``TestClient``
+        la clave que se manda, un tracer opcional y variables de entorno, y
+        devuelve un ``TestClient``
     :rtype: collections.abc.Callable
     """
 
-    def _make(model=None, http_client=None, api_key=TEST_API_KEY, **env):
+    def _make(
+        model=None, http_client=None, api_key=TEST_API_KEY, tracer=None, **env
+    ):
         env.setdefault("API_KEYS", f"{TEST_CLIENT}:{TEST_API_KEY}")
         settings = load_settings(env)
         employees = EmployeeDirectory(settings.employees_path)
@@ -305,7 +310,10 @@ def make_client(clock, log_stream):
             service=settings.observability.service_name,
         )
         observability = Observability(
-            clock=clock, logger=logger, metrics=Metrics(), tracer=NullTracer()
+            clock=clock,
+            logger=logger,
+            metrics=Metrics(),
+            tracer=NullTracer() if tracer is None else tracer,
         )
         app = create_app(
             settings=settings,

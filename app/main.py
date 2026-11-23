@@ -15,8 +15,14 @@ una regla de compliance (ADR 0012).
 
 La página de ``GET /`` se arma una sola vez al arrancar, con el enlace al otro
 producto si ``COMPANION_URL`` tiene valor (ADR 0014).
+
+Los datos personales de la pregunta y del historial se enmascaran antes del
+enrutador, del modelo y de la traza; los de la respuesta, antes de devolverla.
+Cada ``401``, ``429`` y enmascaramiento deja un evento de auditoría sin la
+clave ni el valor detectado (ADR 0018).
 """
 
+import dataclasses
 import os
 from pathlib import Path
 from typing import Annotated, Literal
@@ -38,6 +44,7 @@ from app.observability import (
     install_middleware,
 )
 from app.page import render_index
+from app.pii import mask_pii, merge_types
 from app.pricing import CostMeter, PriceTable
 from app.ratelimit import RateLimiter
 from app.router import choose_route
@@ -53,6 +60,8 @@ INVALID_KEY_DETAIL = "invalid or missing API key"
 RATE_LIMITED_STATUS = 429
 RATE_LIMITED_DETAIL = "rate limit exceeded"
 RETRY_AFTER_HEADER = "Retry-After"
+AUTH_MISSING = "missing"
+AUTH_INVALID = "invalid"
 
 
 class HistoryMessage(BaseModel):
@@ -91,6 +100,9 @@ class AskResponse(BaseModel):
     :type cached_calls: int
     :param cost_usd: Costo de la respuesta en USD, sin redondear
     :type cost_usd: float
+    :param pii_masked: Tipos de dato personal enmascarados en la pregunta, el
+        historial o la respuesta, ordenados y sin repetir; nunca los valores
+    :type pii_masked: list[str]
     """
 
     answer: str
@@ -103,6 +115,7 @@ class AskResponse(BaseModel):
     route: str
     cached_calls: int
     cost_usd: float
+    pii_masked: list[str]
 
 
 class HealthResponse(BaseModel):
@@ -167,6 +180,97 @@ def cost_fields(route, meter):
         "cached_calls": meter.cached_calls,
         "cost_usd": meter.cost_usd,
     }
+
+
+def mask_history(history):
+    """Enmascara los datos personales del contenido de cada mensaje.
+
+    :param history: Mensajes con ``role`` y ``content``, ya recortados
+    :type history: list[dict]
+    :return: Mensajes nuevos con el contenido enmascarado y los tipos
+        encontrados en todos ellos, ordenados y sin repetir
+    :rtype: tuple[list[dict], list[str]]
+    """
+    masked = []
+    groups = []
+    for message in history:
+        content, types = mask_pii(message["content"])
+        masked.append({**message, "content": content})
+        groups.append(types)
+    return masked, merge_types(*groups)
+
+
+def log_pii(observer, where, types):
+    """Escribe ``pii_detected`` si se enmascaró algún dato personal.
+
+    Solo lleva el lugar y los tipos: nunca el valor detectado.
+
+    :param observer: Observador de la petición, con su ``request_id`` y cliente
+    :type observer: app.observability.RequestObserver
+    :param where: Dónde se encontró: ``question``, ``history`` o ``answer``
+    :type where: str
+    :param types: Tipos enmascarados, de ``mask_pii``
+    :type types: list[str]
+    """
+    if types:
+        observer.log_event("pii_detected", where=where, types=list(types))
+
+
+def mask_input(observer, payload, history_window):
+    """Enmascara la pregunta y el historial recortado, y audita lo encontrado.
+
+    Escribe un ``pii_detected`` por cada lugar con datos personales
+    (``question`` y ``history``).
+
+    :param observer: Observador de la petición, con su ``request_id`` y cliente
+    :type observer: app.observability.RequestObserver
+    :param payload: Cuerpo validado de ``POST /ask``
+    :type payload: pydantic.BaseModel
+    :param history_window: Mensajes del historial que se conservan
+    :type history_window: int
+    :return: Pregunta enmascarada, historial recortado y enmascarado, y los
+        tipos encontrados en los dos, ordenados y sin repetir
+    :rtype: tuple[str, list[dict], list[str]]
+    """
+    question, question_types = mask_pii(payload.question)
+    log_pii(observer, "question", question_types)
+    history, history_types = mask_history(
+        recent_history(
+            [message.model_dump() for message in payload.history], history_window
+        )
+    )
+    log_pii(observer, "history", history_types)
+    return question, history, merge_types(question_types, history_types)
+
+
+class MaskedAgent:  # pylint: disable=too-few-public-methods
+    """Corre el agente y enmascara su respuesta antes de devolverla.
+
+    Su ``run`` es la función que se traza como ``chain``: así la traza ya
+    devuelve la respuesta enmascarada. Guarda los tipos enmascarados de la
+    respuesta en ``answer_types``.
+
+    :param agent: Agente de la petición
+    :type agent: app.agent.Agent
+    """
+
+    def __init__(self, agent):
+        self._agent = agent
+        self.answer_types = []
+
+    def run(self, question, history):
+        """Responde con el agente y enmascara los datos personales de la respuesta.
+
+        :param question: Pregunta ya enmascarada
+        :type question: str
+        :param history: Historial ya recortado y enmascarado
+        :type history: list[dict]
+        :return: Resultado del agente con la respuesta enmascarada
+        :rtype: app.agent.AgentResult
+        """
+        result = self._agent.run(question, history)
+        answer, self.answer_types = mask_pii(result.answer)
+        return dataclasses.replace(result, answer=answer)
 
 
 def log_agent_run(observability, observer, payload, result, cost):
@@ -264,6 +368,10 @@ def build_client_guard(settings, observability):
     guarda ni se registra; solo el nombre del cliente, en
     ``request.state.client``, para el log del middleware.
 
+    Cada rechazo deja un evento de auditoría: ``auth_failed`` con ``reason``
+    (``missing`` sin encabezado o con uno vacío, ``invalid`` si la clave no es
+    de nadie) y ``rate_limited`` con ``client`` y ``retry_after`` (ADR 0018).
+
     :param settings: Configuración de la aplicación
     :type settings: app.config.Settings
     :param observability: Dependencias de observabilidad; su reloj mueve la
@@ -287,12 +395,19 @@ def build_client_guard(settings, observability):
         :raises fastapi.HTTPException: ``401`` si falta la clave o no es
             válida; ``429`` si el cliente pasó su límite por minuto
         """
+        request_id = request.state.request_id
         client = auth.identify(api_key)
         if client is None:
+            # Solo el motivo: ni la clave ni una parte de ella.
+            reason = AUTH_INVALID if api_key else AUTH_MISSING
+            observability.logger.event("auth_failed", request_id, reason=reason)
             raise HTTPException(INVALID_KEY_STATUS, detail=INVALID_KEY_DETAIL)
         request.state.client = client
         retry_after = limiter.check(client)
         if retry_after is not None:
+            observability.logger.event(
+                "rate_limited", request_id, client=client, retry_after=retry_after
+            )
             raise HTTPException(
                 RATE_LIMITED_STATUS,
                 detail=RATE_LIMITED_DETAIL,
@@ -373,27 +488,31 @@ def create_app(
         """Responde una pregunta con el modelo que elige el enrutador.
 
         Se crea un agente nuevo con un medidor de costo y solo los últimos
-        mensajes del historial del cliente.
+        mensajes del historial del cliente. La pregunta y el historial se
+        enmascaran antes de todo lo demás; desde ahí el texto original no se
+        usa más.
         """
         request_id = request.state.request_id
-        route = choose_route(payload.question, settings.costs.routing)
-        meter = CostMeter(models[route.model], prices, route.model)
         observer = RequestObserver(observability, request_id, client)
-        agent = Agent(
-            model=meter,
-            directory=directory,
-            max_steps=settings.agent_max_steps,
-            observer=observer,
+        question, history, input_types = mask_input(
+            observer, payload, settings.costs.call.history_window
         )
-        history = recent_history(
-            [message.model_dump() for message in payload.history],
-            settings.costs.call.history_window,
+        route = choose_route(question, settings.costs.routing)
+        meter = CostMeter(models[route.model], prices, route.model)
+        masked_agent = MaskedAgent(
+            Agent(
+                model=meter,
+                directory=directory,
+                max_steps=settings.agent_max_steps,
+                observer=observer,
+            )
         )
-        run_agent = observer.wrap(agent.run, run_type="chain")
+        run_agent = observer.wrap(masked_agent.run, run_type="chain")
         try:
-            result = run_agent(payload.question, history)
+            result = run_agent(question, history)
         except ModelUnavailableError as error:
             return model_unavailable(observability, request_id, error)
+        log_pii(observer, "answer", masked_agent.answer_types)
         cost = cost_fields(route, meter)
         log_agent_run(observability, observer, payload, result, cost)
         return AskResponse(
@@ -403,6 +522,7 @@ def create_app(
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             request_id=request_id,
+            pii_masked=merge_types(input_types, masked_agent.answer_types),
             **cost,
         )
 
