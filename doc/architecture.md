@@ -10,6 +10,9 @@ pipeline de CI pasa. Desde la especificación 05, queda escrito por qué atiende
 simultáneas y la página enlaza con el segundo producto, el Asistente de políticas de RH. Desde la
 especificación 06, ese segundo producto vive en `politicas/` del mismo repositorio y se publica como
 otro servicio del mismo Blueprint; el código del HR no cambia (ver `politicas/doc/architecture.md`).
+Desde la especificación 07, `/metrics` también dice cómo se usa el producto y cuánto cuesta cada
+modelo: respuestas y costo por modelo, llamadas de caché, respuestas cortadas, herramientas y clases
+de código HTTP (ADR 0015 y 0016), igual en los dos productos.
 
 ## Componentes
 
@@ -40,7 +43,8 @@ flowchart LR
     M -- "agent_run (con client)" --> LOG
     A -- "audit (con client)" --> LOG
     LOG --> OUT[("stdout")]
-    MW --> MET["Metrics<br/>app/metrics.py"]
+    MW -- "record_request: requests,<br/>latencia, status" --> MET["Metrics<br/>app/metrics.py<br/>un candado"]
+    M -- "record_answer: by_model, cached_calls,<br/>stopped, tools, costo" --> MET
     A -. "trazas con request_id y client" .-> TR["Tracer<br/>app/tracing.py"]
     TR -. "opcional, entradas y salidas ocultas" .-> LS[(LangSmith)]
 ```
@@ -55,6 +59,7 @@ sequenceDiagram
     participant API as main.py
     participant AG as Agent y CostMeter
     participant LOG as JsonLogger
+    participant MET as Metrics
     WEB->>MW: POST /ask con X-API-Key
     MW->>MW: resuelve request_id, inicia reloj
     MW->>DEP: petición
@@ -71,12 +76,44 @@ sequenceDiagram
             AG->>LOG: audit (tool, args, client)
             AG-->>API: resultado y costo
             API->>LOG: agent_run (conteos, costo, client)
+            API->>MET: tokens y record_answer (solo con 200)
             API-->>MW: 200 (o 502 si el gateway falla)
         end
     end
+    MW->>MET: record_request (requests, latencia, status por clase)
     MW->>LOG: request (method, path, status, latency_ms, client)
     MW-->>WEB: respuesta con X-Request-ID
     WEB->>WEB: 401 Clave inválida, 429 espera N segundos
+```
+
+## Métricas de negocio
+
+Los cinco campos de la especificación 07 viven en `Metrics`, bajo el mismo candado que `requests`,
+latencia, tokens y costo (ADR 0015). Cada uno se suma en un solo punto (ADR 0016).
+
+```mermaid
+flowchart TB
+    subgraph MID["Middleware, cada petición"]
+        RR["record_request(status, latency_ms)"]
+    end
+    subgraph ASK["log_agent_run, cada 200 de POST /ask"]
+        RA["record_answer(model, cost_usd,<br/>cached_calls, tools_used, stopped)"]
+    end
+    subgraph MET["Metrics, un threading.Lock"]
+        REQ["requests, error_rate, latency_ms"]
+        ST["status: 2xx, 4xx, 5xx<br/>(5xx si es 500 o más, 4xx de 400 a 499,<br/>2xx el resto; suma = requests)"]
+        BM["by_model: requests y cost_usd<br/>por nombre de modelo"]
+        CC["cached_calls, stopped"]
+        TL["tools: veces por herramienta ejecutada"]
+        CU["cost_usd total"]
+    end
+    RR --> REQ
+    RR --> ST
+    RA --> BM
+    RA --> CC
+    RA --> TL
+    RA --> CU
+    MET -- "snapshot: copia dentro del candado" --> GM["GET /metrics<br/>sin textos, claves ni datos personales"]
 ```
 
 ## La página y el enlace al otro producto
@@ -104,7 +141,8 @@ sequenceDiagram
 ## Peticiones simultáneas
 
 Un solo proceso uvicorn por copia. Lo que se escribe entre peticiones lleva candado; lo demás es de
-solo lectura o vive solo durante una petición (ADR 0013).
+solo lectura o vive solo durante una petición (ADR 0013). Las métricas de negocio no agregan otro
+objeto compartido: van dentro de `Metrics` (ADR 0015).
 
 ```mermaid
 flowchart TB
@@ -117,7 +155,7 @@ flowchart TB
         end
         EL --> POOL
         subgraph SHARED["Compartido y escrito, con threading.Lock"]
-            MET["Metrics"]
+            MET["Metrics<br/>incluye las métricas de negocio"]
             LOG["JsonLogger"]
             RL["RateLimiter"]
         end
@@ -171,6 +209,9 @@ flowchart LR
 - Bucle con tope y herramientas de solo lectura (ADR 0003).
 - Un `request_id` por petición y log JSON sin texto de preguntas ni respuestas (ADR 0004).
 - Métricas en memoria de cada proceso, identificadas por `pid`, con costo acumulado (ADR 0005).
+- Métricas de negocio en la misma `Metrics` y el mismo candado; nunca influyen en una respuesta y no
+  llevan textos, claves ni datos personales (ADR 0015). `status` se suma junto con `requests`; lo demás,
+  una vez por cada `200` de `/ask` con los datos del evento `agent_run` (ADR 0016).
 - Trazas en LangSmith opcionales, con entradas y salidas ocultas por omisión (ADR 0006).
 - Enrutamiento por regla, modelo real por AI Gateway y costo medido (ADR 0007, 0008 y 0009).
 - Una clave por cliente en una dependencia de ruta; la clave nunca se escribe, solo el nombre del
@@ -202,11 +243,15 @@ flowchart LR
 | `COMPANION_URL` | vacía | `page.py`; vacía: sin enlace. En Render se escribe a mano en Environment |
 | `COMPANION_NAME` | `Asistente de políticas de RH` | `page.py`; texto del enlace |
 
+La especificación 07 no agrega variables.
+
 ## Dónde mirar
 
 - Log: la salida estándar del proceso (en Render, la pestaña Logs); se filtra por `request_id` o por
   `client`.
-- Métricas: `GET /metrics` con una clave; el `pid` dice de qué copia vienen.
+- Métricas: `GET /metrics` con una clave; el `pid` dice de qué copia vienen. Uso y costo por modelo en
+  `by_model`, herramientas en `tools`, respuestas cortadas en `stopped`, caché en `cached_calls` y
+  clases de código en `status`.
 - Documentación de la API: Swagger en `/docs`, abierto sin clave, con «Authorize» para `X-API-Key`.
 - Pipeline: la pestaña Actions del repositorio, una etapa por trabajo; las de Políticas terminan en
   `-politicas`.

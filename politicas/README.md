@@ -30,7 +30,9 @@ Todo lo demás es igual al HR Assistant:
   salida (`MODEL_MAX_TOKENS`) y caché de AI Gateway (`CACHE_TTL_SECONDS`).
 - **Observabilidad**: un `request_id` por petición (encabezado `X-Request-ID`, cuerpo de
   `POST /ask` y página), log JSON en la salida estándar con `service: politicas-rh` (sin el texto
-  de preguntas ni respuestas), `GET /metrics` y trazas opcionales en LangSmith, en el proyecto
+  de preguntas ni respuestas), `GET /metrics` (con métricas de negocio: respuestas y costo por
+  modelo, llamadas de la caché, respuestas cortadas por el tope, usos de cada herramienta y
+  peticiones por clase de código) y trazas opcionales en LangSmith, en el proyecto
   `LANGSMITH_PROJECT`.
 - **Acceso**: una clave por cliente (`API_KEYS`, encabezado `X-API-Key`), límite por cliente
   (`RATE_LIMIT_PER_MINUTE`, `429` con `Retry-After`) y compliance como código con
@@ -142,7 +144,7 @@ sin reintentar.
 | `GET /health` | No | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | No | Documentación interactiva de la API, con el título «Asistente de políticas de RH» |
 | `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
-| `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`) y `cost_usd` acumulado |
+| `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado, `by_model` (por modelo: `requests` y `cost_usd`), `cached_calls`, `stopped`, `tools` (veces que se ejecutó cada herramienta) y `status` (`2xx`, `4xx`, `5xx`; suman `requests`) |
 
 Las rutas con clave piden `X-API-Key` y cuentan en el límite del cliente:
 
@@ -233,7 +235,11 @@ puede servir el texto viejo de una política mientras dure `CACHE_TTL_SECONDS`.
   Para seguir una petición, filtra por su `request_id` (el que muestra la página o devuelve el
   encabezado `X-Request-ID`).
 - Métricas: `GET /metrics` de cada copia del servicio, con una clave de Políticas; el `pid` dice
-  de cuál. `cost_usd` es el costo acumulado de las respuestas de esa copia.
+  de cuál. `cost_usd` es el costo acumulado de las respuestas de esa copia; `by_model` lo
+  reparte por modelo. `stopped` cuenta las respuestas `200` de `POST /ask` cortadas por
+  `AGENT_MAX_STEPS` y `status` las peticiones por clase de código (un `3xx` cuenta como `2xx`).
+  Las llaves son nombres de modelo, de herramienta o de clase: nunca textos, claves ni datos
+  personales.
 - Costo por respuesta: el evento `agent_run` del log trae `model`, `route`, `cached_calls` y
   `cost_usd` (sin el texto de la pregunta ni de la respuesta).
 - Trazas: el proyecto `LANGSMITH_PROJECT` de LangSmith, solo si se encendieron con

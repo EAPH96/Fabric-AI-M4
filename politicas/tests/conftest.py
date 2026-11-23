@@ -71,7 +71,8 @@ class FakeGateway:
     """AI Gateway simulado con ``httpx.MockTransport``: nunca usa la red.
 
     Guarda cada petición y responde como Workers AI. Cada prueba cambia
-    ``status`` o ``content`` para simular otra respuesta.
+    ``status``, ``content`` o ``headers`` para simular otra respuesta; con
+    ``cf-aig-cache-status: HIT`` en ``headers`` responde como la caché.
     """
 
     PROMPT_TOKENS = 120
@@ -81,6 +82,7 @@ class FakeGateway:
         self.requests = []
         self.status = 200
         self.content = json.dumps({"answer": "Hola desde el gateway"})
+        self.headers = {}
 
     def client(self):
         """Cliente HTTP cuyo transporte es este gateway simulado.
@@ -114,7 +116,7 @@ class FakeGateway:
                 "completion_tokens": self.COMPLETION_TOKENS,
             },
         }
-        return httpx.Response(self.status, json=payload)
+        return httpx.Response(self.status, json=payload, headers=self.headers)
 
 
 class CompanionLinkParser(HTMLParser):

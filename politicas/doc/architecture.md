@@ -2,9 +2,10 @@
 
 Asistente que responde preguntas del personal sobre las políticas de la empresa (vacaciones, aguinaldo, jornada,
 permisos y otras) y cita siempre la política que usó. Es el HR Assistant de `product/` con otros datos, otras dos
-herramientas y otro modelo simulado (especificación 06). Hereda sus decisiones: los ADR 0001 a 0014 del HR
+herramientas y otro modelo simulado (especificación 06). Hereda sus decisiones: los ADR 0001 a 0016 del HR
 Assistant (`product/doc/adr/`) valen igual aquí. Vive en `product/politicas/` y se publica como un servicio aparte
-(ADR 0001), sin importar nada de `product/app/` (ADR 0002).
+(ADR 0001), sin importar nada de `product/app/` (ADR 0002). Desde la especificación 07, `/metrics` agrega las
+métricas de negocio con el mismo comportamiento que el HR (ADR 0015 y 0016 del HR).
 
 ## Componentes
 
@@ -31,7 +32,8 @@ flowchart LR
     A -. "trazas, proyecto politicas-rh" .-> TR["Tracer<br/>app/tracing.py"]
     TR -. "opcional" .-> LS[(LangSmith)]
     MW --> LOG["JsonLogger<br/>service: politicas-rh"]
-    MW --> MET["Metrics<br/>/metrics"]
+    MW -- "record_request: requests,<br/>latencia, status" --> MET["Metrics<br/>/metrics, un candado"]
+    M -- "record_answer: by_model, cached_calls,<br/>stopped, tools, costo" --> MET
 ```
 
 ## Una pregunta a `/ask`
@@ -43,6 +45,7 @@ sequenceDiagram
     participant AG as Agent
     participant MOD as Modelo
     participant CAT as PolicyCatalog
+    participant MET as Metrics
     WEB->>API: POST /ask con X-API-Key
     API->>API: request_id, clave (401), límite (429), cuerpo (422), ruta
     API->>AG: run(question, history)
@@ -61,6 +64,8 @@ sequenceDiagram
     AG->>MOD: Resultado de la herramienta: ...
     MOD-->>AG: answer que cita los id
     AG-->>API: resultado, tokens y costo
+    API->>MET: record_answer (solo con 200)
+    API->>MET: record_request (toda petición, status por clase)
     API-->>WEB: 200 con answer, request_id, model, cost_usd
 ```
 
@@ -89,13 +94,15 @@ flowchart LR
 | Adaptados | `agent` (herramientas), `llm` (modelo simulado), `gateway` (`SYSTEM_PROMPT`), `config` (variables), `tracing` (`LANGSMITH_PROJECT`), `main` (título y catálogo), `static/index.html` (textos y aviso) |
 | Propio | `policies` (en lugar de `directory`) |
 
-Un arreglo en un módulo copiado se hace también en el otro producto.
+Un arreglo en un módulo copiado se hace también en el otro producto. En la especificación 07, `metrics.py` cambia
+igual en los dos productos y sigue siendo copia; `log_agent_run` de `main.py` cambia igual en los dos.
 
 ## Principios
 
 - Todo lo del HR Assistant: sin estado, bucle con tope, herramientas de solo lectura, `request_id` y log JSON sin
   texto de preguntas, métricas por proceso, costo medido, claves por cliente, límite, compliance al arrancar,
-  concurrencia con candados y enlace armado al arrancar (ADR 0001 a 0014 del HR).
+  concurrencia con candados, enlace armado al arrancar y métricas de negocio en la misma `Metrics` (ADR 0001 a 0016
+  del HR).
 - Servicio aparte en el mismo repositorio, con su propio contexto de Docker y sus propias etapas de CI (ADR 0001).
 - Ningún import de `product/app/`: los módulos se copian (ADR 0002).
 - Un tema coincide si un `topic` o una `keyword`, sin acentos ni mayúsculas, es igual a él o está dentro; la
@@ -104,7 +111,7 @@ Un arreglo en un módulo copiado se hace también en el otro producto.
 
 ## Variables propias de Políticas
 
-Las demás variables y sus valores por omisión son los del HR Assistant.
+Las demás variables y sus valores por omisión son los del HR Assistant. La especificación 07 no agrega variables.
 
 | Variable | Por omisión | Dónde actúa |
 | --- | --- | --- |
@@ -117,7 +124,9 @@ Las demás variables y sus valores por omisión son los del HR Assistant.
 ## Dónde mirar
 
 - Log: salida estándar del servicio `Fabric-AI-M4-politicas` en Render; se filtra por `request_id` o `client`.
-- Métricas: `GET /metrics` con una clave de Políticas.
+- Métricas: `GET /metrics` con una clave de Políticas. Uso y costo por modelo en `by_model`, `search_policies` y
+  `get_policy` en `tools`, respuestas cortadas en `stopped`, caché en `cached_calls` y clases de código en
+  `status`.
 - Documentación de la API: Swagger en `/docs`, con el título «Asistente de políticas de RH».
 - Pipeline: las etapas `*-politicas` en la pestaña Actions.
 - Producción: `uv run python -m verification production <url-hr> <url-politicas>` con `SMOKE_API_KEY` y

@@ -5,7 +5,7 @@ suyas; ``app`` es la instancia que arranca ``uvicorn app.main:app`` con la
 configuración del entorno. Cada petición lleva un ``request_id``, deja una
 línea JSON en el log y alimenta las métricas de ``GET /metrics``.
 
-Mismas rutas, códigos y controles que el HR Assistant (sus ADR 0001 a 0014);
+Mismas rutas, códigos y controles que el HR Assistant (sus ADR 0001 a 0016);
 cambian el catálogo, las herramientas, el modelo simulado y la página.
 
 En cada ``POST /ask`` el enrutador elige el modelo, se recorta el historial y
@@ -174,10 +174,12 @@ def cost_fields(route, meter):
 
 
 def log_agent_run(observability, observer, payload, result, cost):
-    """Escribe el evento ``agent_run`` y suma tokens y costo a las métricas.
+    """Escribe el evento ``agent_run`` y suma tokens y negocio a las métricas.
 
     Solo registra conteos y el nombre del cliente: nunca el texto de la
-    pregunta ni de la respuesta, ni la clave.
+    pregunta ni de la respuesta, ni la clave. Las métricas de negocio
+    (modelo, costo, caché, tope y herramientas) salen de los mismos datos del
+    evento (ADR 0016).
 
     :param observability: Dependencias de observabilidad
     :type observability: app.observability.Observability
@@ -202,7 +204,13 @@ def log_agent_run(observability, observer, payload, result, cost):
         **cost,
     )
     observability.metrics.add_tokens(result.input_tokens, result.output_tokens)
-    observability.metrics.add_cost(cost["cost_usd"])
+    observability.metrics.record_answer(
+        cost["model"],
+        cost["cost_usd"],
+        cost["cached_calls"],
+        result.tools_used,
+        result.stopped,
+    )
 
 
 def model_unavailable(observability, request_id, error):

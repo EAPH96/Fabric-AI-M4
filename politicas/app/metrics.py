@@ -1,18 +1,47 @@
 """Métricas en memoria de este proceso.
 
-Son estado operativo, no de negocio (ADR 0005 del HR): cada copia del servicio
+No influyen en las respuestas (ADR 0005 y 0015 del HR): cada copia del servicio
 tiene las suyas y las identifica con su ``pid``. Las latencias se guardan en una
 ventana acotada para que la memoria no crezca sin límite.
+
+Las métricas de negocio (``by_model``, ``cached_calls``, ``stopped``,
+``tools`` y ``status``) usan el mismo candado; sus llaves son nombres de
+modelo, de herramienta o de clase de código, nunca textos ni datos personales
+(ADR 0015 del HR). Dónde se suma cada una lo fija el ADR 0016 del HR.
 """
 
 import math
 import os
 import threading
 from collections import deque
+from dataclasses import dataclass, field
 
 LATENCY_WINDOW = 1000
+CLIENT_ERROR_STATUS = 400
 SERVER_ERROR_STATUS = 500
 PERCENT = 100
+STATUS_OK = "2xx"
+STATUS_CLIENT_ERROR = "4xx"
+STATUS_SERVER_ERROR = "5xx"
+
+
+def status_class(status):
+    """Clasifica un código HTTP en ``2xx``, ``4xx`` o ``5xx``.
+
+    Todo lo que no es error del cliente ni del servidor (por ejemplo, una
+    redirección) cuenta como ``2xx``, para que la suma de las tres clases sea
+    siempre el número de peticiones (ADR 0016 del HR).
+
+    :param status: Código HTTP de la respuesta
+    :type status: int
+    :return: ``5xx`` si es 500 o más, ``4xx`` de 400 a 499 y ``2xx`` si no
+    :rtype: str
+    """
+    if status >= SERVER_ERROR_STATUS:
+        return STATUS_SERVER_ERROR
+    if status >= CLIENT_ERROR_STATUS:
+        return STATUS_CLIENT_ERROR
+    return STATUS_OK
 
 
 def nearest_rank(sorted_values, percentile):
@@ -31,8 +60,60 @@ def nearest_rank(sorted_values, percentile):
     return sorted_values[max(rank, 1) - 1]
 
 
+def empty_status():
+    """Crea el conteo por clase de código con las tres llaves en cero.
+
+    :return: ``2xx``, ``4xx`` y ``5xx`` en ``0``
+    :rtype: dict[str, int]
+    """
+    return {STATUS_OK: 0, STATUS_CLIENT_ERROR: 0, STATUS_SERVER_ERROR: 0}
+
+
+@dataclass
+class BusinessCounts:
+    """Métricas de negocio del proceso.
+
+    No tiene candado propio: ``Metrics`` la cambia y la lee solo dentro del
+    suyo.
+
+    :param by_model: Por nombre de modelo, ``requests`` y ``cost_usd``
+    :type by_model: dict[str, dict]
+    :param cached_calls: Llamadas que respondió la caché del gateway
+    :type cached_calls: int
+    :param stopped: Respuestas cortadas por el tope de pasos
+    :type stopped: int
+    :param tools: Por nombre de herramienta, las veces que se ejecutó
+    :type tools: dict[str, int]
+    :param status: Peticiones por clase de código
+    :type status: dict[str, int]
+    """
+
+    by_model: dict = field(default_factory=dict)
+    cached_calls: int = 0
+    stopped: int = 0
+    tools: dict = field(default_factory=dict)
+    status: dict = field(default_factory=empty_status)
+
+    def as_dict(self):
+        """Copia las métricas de negocio para devolverlas.
+
+        :return: ``by_model`` (copiado modelo por modelo), ``cached_calls``,
+            ``stopped``, ``tools`` y ``status``
+        :rtype: dict
+        """
+        return {
+            "by_model": {
+                model: dict(entry) for model, entry in self.by_model.items()
+            },
+            "cached_calls": self.cached_calls,
+            "stopped": self.stopped,
+            "tools": dict(self.tools),
+            "status": dict(self.status),
+        }
+
+
 class Metrics:
-    """Contadores de peticiones, errores, latencias y tokens del proceso.
+    """Contadores de peticiones, errores, latencias, tokens y negocio.
 
     Es seguro entre hilos: los endpoints síncronos corren en varios hilos.
 
@@ -47,9 +128,10 @@ class Metrics:
         self._server_errors = 0
         self._tokens = {"input": 0, "output": 0}
         self._cost_usd = 0.0
+        self._business = BusinessCounts()
 
     def record_request(self, status, latency_ms):
-        """Registra una petición atendida.
+        """Registra una petición atendida y su clase de código.
 
         :param status: Código HTTP de la respuesta
         :type status: int
@@ -60,6 +142,7 @@ class Metrics:
             self._requests += 1
             if status >= SERVER_ERROR_STATUS:
                 self._server_errors += 1
+            self._business.status[status_class(status)] += 1
             self._latencies.append(float(latency_ms))
 
     def add_tokens(self, input_tokens, output_tokens):
@@ -74,22 +157,49 @@ class Metrics:
             self._tokens["input"] += input_tokens
             self._tokens["output"] += output_tokens
 
-    def add_cost(self, cost_usd):
-        """Suma el costo de una respuesta.
+    def record_answer(self, model, cost_usd, cached_calls, tools, stopped):
+        """Suma una respuesta ``200`` de ``POST /ask`` a las métricas de negocio.
 
-        :param cost_usd: Costo en USD, sin redondear
+        En una sola sección crítica suma la respuesta y su costo a su modelo,
+        el costo al total, las llamadas de la caché, el corte por el tope y
+        cada herramienta ejecutada (una repetida suma dos veces).
+
+        :param model: Nombre del modelo que dio la respuesta
+        :type model: str
+        :param cost_usd: Costo de la respuesta en USD, sin redondear
         :type cost_usd: float
+        :param cached_calls: Llamadas que respondió la caché del gateway
+        :type cached_calls: int
+        :param tools: Nombres de las herramientas ejecutadas, en orden
+        :type tools: list[str]
+        :param stopped: Si la respuesta la cortó el tope de pasos
+        :type stopped: bool
         """
         with self._lock:
+            business = self._business
+            entry = business.by_model.setdefault(
+                model, {"requests": 0, "cost_usd": 0.0}
+            )
+            entry["requests"] += 1
+            entry["cost_usd"] += cost_usd
             self._cost_usd += cost_usd
+            business.cached_calls += cached_calls
+            if stopped:
+                business.stopped += 1
+            for name in tools:
+                business.tools[name] = business.tools.get(name, 0) + 1
 
     def snapshot(self, slo_p95_ms):
         """Devuelve las métricas actuales con el estado de la meta de latencia.
 
+        Copia todo dentro del candado: lo que se devuelve no cambia con las
+        peticiones que siguen, ni cambiarlo altera la siguiente lectura.
+
         :param slo_p95_ms: Meta de latencia p95 en milisegundos
         :type slo_p95_ms: int
         :return: ``pid``, ``requests``, ``error_rate``, ``latency_ms``,
-            ``tokens``, ``slo`` y ``cost_usd`` acumulado
+            ``tokens``, ``slo``, ``cost_usd`` acumulado, ``by_model``,
+            ``cached_calls``, ``stopped``, ``tools`` y ``status``
         :rtype: dict
         """
         with self._lock:
@@ -98,6 +208,7 @@ class Metrics:
             server_errors = self._server_errors
             tokens = dict(self._tokens)
             cost_usd = self._cost_usd
+            business = self._business.as_dict()
         p95 = nearest_rank(latencies, 95)
         error_rate = round(server_errors / requests, 4) if requests else 0.0
         return {
@@ -108,4 +219,5 @@ class Metrics:
             "tokens": tokens,
             "slo": {"p95_ms_target": slo_p95_ms, "met": p95 < slo_p95_ms},
             "cost_usd": cost_usd,
+            **business,
         }

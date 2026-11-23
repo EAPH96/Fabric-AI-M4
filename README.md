@@ -24,7 +24,9 @@ Cada petición se puede rastrear y medir:
   `X-Request-ID`; `POST /ask` también en el cuerpo, y la página lo muestra bajo cada respuesta.
 - Log en JSON, una línea por evento, en la salida estándar: `request`, `agent_run`, `audit` y
   `error`. Nunca se registra el texto de preguntas ni respuestas, ni el mensaje de un error.
-- `GET /metrics` con las métricas de este proceso y si se cumple la meta de latencia p95.
+- `GET /metrics` con las métricas de este proceso y si se cumple la meta de latencia p95, más
+  las métricas de negocio: respuestas y costo por modelo, llamadas de la caché, respuestas
+  cortadas por el tope de pasos, usos de cada herramienta y peticiones por clase de código.
 - Trazas opcionales en LangSmith, con entradas y salidas ocultas por omisión.
 
 Y solo lo usa quien tiene clave:
@@ -124,7 +126,7 @@ sin reintentar.
 | `GET /health` | No | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | No | Documentación interactiva de la API |
 | `POST /ask` | Sí | `{"question", "history"}` y devuelve `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
-| `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`) y `cost_usd` acumulado |
+| `GET /metrics` | Sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado, `by_model` (por modelo: `requests` y `cost_usd`), `cached_calls`, `stopped`, `tools` (veces que se ejecutó cada herramienta) y `status` (`2xx`, `4xx`, `5xx`; suman `requests`) |
 
 Las rutas con clave piden `X-API-Key` y cuentan en el límite del cliente:
 
@@ -211,7 +213,10 @@ datos de empleados y puede servir datos viejos mientras dure `CACHE_TTL_SECONDS`
 - Log: la salida estándar del proceso. Para seguir una petición, filtra por su `request_id`
   (el que muestra la página o devuelve el encabezado `X-Request-ID`).
 - Métricas: `GET /metrics` de cada copia del servicio; el `pid` dice de cuál. `cost_usd` es el
-  costo acumulado de las respuestas de esa copia.
+  costo acumulado de las respuestas de esa copia; `by_model` lo reparte por modelo. `stopped`
+  cuenta las respuestas `200` de `POST /ask` cortadas por `AGENT_MAX_STEPS` y `status` las
+  peticiones por clase de código (un `3xx` cuenta como `2xx`). Las llaves son nombres de modelo,
+  de herramienta o de clase: nunca textos, claves ni datos personales.
 - Costo por respuesta: el evento `agent_run` del log trae `model`, `route`, `cached_calls` y
   `cost_usd` (sin el texto de la pregunta ni de la respuesta).
 - Trazas: el proyecto de LangSmith, solo si se encendieron con `LANGSMITH_TRACING=true` y clave.
