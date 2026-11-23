@@ -24,6 +24,12 @@ services:
         value: "true"
       - key: HIDE_OUTPUTS
         value: "true"
+      # Sin enrutamiento: el modelo pequeño casi nunca pidió una herramienta en la
+      # medición real, así que todas las preguntas van al modelo grande (spec 08).
+      - key: ROUTING
+        value: "false"
+      # Sin CACHE_TTL_SECONDS: el HR responde con datos de empleados y no se
+      # guardan en la caché del gateway (spec 08).
       # Secretos: Render pide su valor al crear el Blueprint; nunca van en el repositorio.
       - key: API_KEYS
         sync: false
@@ -57,6 +63,14 @@ services:
         value: "true"
       - key: SERVICE_NAME
         value: politicas-rh
+      # Sin enrutamiento: el modelo pequeño casi nunca pidió una herramienta en la
+      # medición real, así que todas las preguntas van al modelo grande (spec 08).
+      - key: ROUTING
+        value: "false"
+      # Caché del gateway por una hora: reglas generales, sin datos de personas, que
+      # se repiten y cambian pocas veces al año (spec 08).
+      - key: CACHE_TTL_SECONDS
+        value: "3600"
       # Secretos: Render pide su valor al crear el Blueprint; nunca van en el repositorio.
       # API_KEYS lleva claves propias de este servicio, distintas de las del HR.
       - key: API_KEYS

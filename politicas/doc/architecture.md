@@ -2,10 +2,12 @@
 
 Asistente que responde preguntas del personal sobre las políticas de la empresa (vacaciones, aguinaldo, jornada,
 permisos y otras) y cita siempre la política que usó. Es el HR Assistant de `product/` con otros datos, otras dos
-herramientas y otro modelo simulado (especificación 06). Hereda sus decisiones: los ADR 0001 a 0016 del HR
+herramientas y otro modelo simulado (especificación 06). Hereda sus decisiones: los ADR 0001 a 0017 del HR
 Assistant (`product/doc/adr/`) valen igual aquí. Vive en `product/politicas/` y se publica como un servicio aparte
 (ADR 0001), sin importar nada de `product/app/` (ADR 0002). Desde la especificación 07, `/metrics` agrega las
-métricas de negocio con el mismo comportamiento que el HR (ADR 0015 y 0016 del HR).
+métricas de negocio con el mismo comportamiento que el HR (ADR 0015 y 0016 del HR). Desde la especificación 08, en
+producción todas las preguntas van al modelo grande y las respuestas del gateway se guardan en caché una hora
+(ADR 0017 del HR); el código no cambia.
 
 ## Componentes
 
@@ -86,6 +88,39 @@ flowchart LR
     LV --> SM["verification production url-hr url-politicas<br/>SMOKE_API_KEY_POLITICAS"]
 ```
 
+## Configuración de producción
+
+`render.yaml` fija para `Fabric-AI-M4-politicas` `ROUTING=false` y `CACHE_TTL_SECONDS=3600` (ADR 0017 del HR).
+Con el enrutamiento, el modelo pequeño no pidió ninguna herramienta en 0 de 9 casos de la medición con el modelo
+real; sin él, la calidad fue igual a la línea base y el costo bajó 10 %. La caché es segura aquí porque Políticas
+responde reglas generales sin datos de personas, sus preguntas se repiten y una política cambia pocas veces al año.
+El HR no lleva caché.
+
+```mermaid
+sequenceDiagram
+    participant API as main.py
+    participant RT as Enrutador
+    participant GW as GatewayModel
+    participant AIG as AI Gateway
+    participant MET as Metrics
+    API->>RT: choose_route con ROUTING=false
+    RT-->>API: MODEL_LARGE, routing_disabled
+    API->>GW: complete(messages)
+    GW->>AIG: petición con cf-aig-cache-ttl: 3600
+    alt la misma petición en la última hora
+        AIG-->>GW: respuesta con cf-aig-cache-status: HIT
+        GW-->>API: llamada cacheada, costo 0
+    else petición nueva
+        AIG-->>GW: respuesta del modelo grande
+        GW-->>API: llamada con tokens y costo
+    end
+    API->>MET: record_answer: cached_calls y cost_usd
+```
+
+En desarrollo, en las pruebas y en `verification evaluate` siguen los valores por omisión (`ROUTING=true`,
+`CACHE_TTL_SECONDS=0`). Una respuesta de la caché puede tener hasta una hora de antigüedad y la caché es común a
+todos los clientes del servicio.
+
 ## Módulos copiados y adaptados (ADR 0002)
 
 | Estado | Módulos de `app/` |
@@ -95,14 +130,15 @@ flowchart LR
 | Propio | `policies` (en lugar de `directory`) |
 
 Un arreglo en un módulo copiado se hace también en el otro producto. En la especificación 07, `metrics.py` cambia
-igual en los dos productos y sigue siendo copia; `log_agent_run` de `main.py` cambia igual en los dos.
+igual en los dos productos y sigue siendo copia; `log_agent_run` de `main.py` cambia igual en los dos. En la
+especificación 08 ningún módulo cambia.
 
 ## Principios
 
 - Todo lo del HR Assistant: sin estado, bucle con tope, herramientas de solo lectura, `request_id` y log JSON sin
   texto de preguntas, métricas por proceso, costo medido, claves por cliente, límite, compliance al arrancar,
-  concurrencia con candados, enlace armado al arrancar y métricas de negocio en la misma `Metrics` (ADR 0001 a 0016
-  del HR).
+  concurrencia con candados, enlace armado al arrancar, métricas de negocio en la misma `Metrics` y configuración
+  de costos de producción (ADR 0001 a 0017 del HR).
 - Servicio aparte en el mismo repositorio, con su propio contexto de Docker y sus propias etapas de CI (ADR 0001).
 - Ningún import de `product/app/`: los módulos se copian (ADR 0002).
 - Un tema coincide si un `topic` o una `keyword`, sin acentos ni mayúsculas, es igual a él o está dentro; la
@@ -111,7 +147,8 @@ igual en los dos productos y sigue siendo copia; `log_agent_run` de `main.py` ca
 
 ## Variables propias de Políticas
 
-Las demás variables y sus valores por omisión son los del HR Assistant. La especificación 07 no agrega variables.
+Las demás variables y sus valores por omisión son los del HR Assistant. Las especificaciones 07 y 08 no agregan
+variables; la 08 fija en `render.yaml` `ROUTING=false` y `CACHE_TTL_SECONDS=3600` para este servicio.
 
 | Variable | Por omisión | Dónde actúa |
 | --- | --- | --- |
@@ -126,7 +163,12 @@ Las demás variables y sus valores por omisión son los del HR Assistant. La esp
 - Log: salida estándar del servicio `Fabric-AI-M4-politicas` en Render; se filtra por `request_id` o `client`.
 - Métricas: `GET /metrics` con una clave de Políticas. Uso y costo por modelo en `by_model`, `search_policies` y
   `get_policy` en `tools`, respuestas cortadas en `stopped`, caché en `cached_calls` y clases de código en
-  `status`.
+  `status`. En producción `by_model` solo muestra `MODEL_LARGE` y `cached_calls` cuenta las llamadas servidas por
+  la caché del gateway, que no suman costo.
+- Respuestas de `/ask` en producción: `route` es `routing_disabled`; `cached_calls` mayor que 0 indica que la
+  respuesta salió de la caché.
+- Configuración de producción: `render.yaml`, servicio `Fabric-AI-M4-politicas`; la comprueba
+  `verification/contract/test_contract_08.py`.
 - Documentación de la API: Swagger en `/docs`, con el título «Asistente de políticas de RH».
 - Pipeline: las etapas `*-politicas` en la pestaña Actions.
 - Producción: `uv run python -m verification production <url-hr> <url-politicas>` con `SMOKE_API_KEY` y

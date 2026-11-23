@@ -12,7 +12,9 @@ especificación 06, ese segundo producto vive en `politicas/` del mismo reposito
 otro servicio del mismo Blueprint; el código del HR no cambia (ver `politicas/doc/architecture.md`).
 Desde la especificación 07, `/metrics` también dice cómo se usa el producto y cuánto cuesta cada
 modelo: respuestas y costo por modelo, llamadas de caché, respuestas cortadas, herramientas y clases
-de código HTTP (ADR 0015 y 0016), igual en los dos productos.
+de código HTTP (ADR 0015 y 0016), igual en los dos productos. Desde la especificación 08, la
+configuración de producción de `render.yaml` manda todas las preguntas al modelo grande en los dos
+servicios y enciende la caché del gateway solo en Políticas (ADR 0017); el código no cambia.
 
 ## Componentes
 
@@ -202,6 +204,37 @@ flowchart LR
     SM -- "falla" --> TRI["triage<br/>security, deploy o persona"]
 ```
 
+## Configuración de producción
+
+Desde la especificación 08, `render.yaml` fija dos palancas de costo de la sesión 3 con los datos de
+la medición con el modelo real (ADR 0017). El código y los valores por omisión no cambian: en
+desarrollo, en las pruebas y en `verification evaluate` el enrutamiento sigue encendido y la caché
+apagada, para seguir midiendo las palancas.
+
+```mermaid
+flowchart LR
+    RY["render.yaml"] --> SH["Fabric-AI-M4<br/>ROUTING=false<br/>sin CACHE_TTL_SECONDS (0)"]
+    RY --> SP["Fabric-AI-M4-politicas<br/>ROUTING=false<br/>CACHE_TTL_SECONDS=3600"]
+    SH --> RH["choose_route: routing_disabled<br/>siempre MODEL_LARGE"]
+    SP --> RP["choose_route: routing_disabled<br/>siempre MODEL_LARGE"]
+    RH --> GH["GatewayModel sin cf-aig-cache-ttl<br/>cada llamada cuesta"]
+    RP --> GP["GatewayModel con cf-aig-cache-ttl: 3600<br/>HIT: cached_calls, costo 0"]
+    GH --> AIG[(Cloudflare AI Gateway)]
+    GP --> AIG
+    DEV["Desarrollo, pruebas y evaluate<br/>valores por omisión de config.py<br/>ROUTING=true, CACHE_TTL_SECONDS=0"] -.-> RR["Enrutador por regla<br/>MODEL_SMALL o MODEL_LARGE (ADR 0007)"]
+```
+
+| Variable | HR en producción | Políticas en producción | Por omisión |
+| --- | --- | --- | --- |
+| `ROUTING` | `false` | `false` | `true` |
+| `CACHE_TTL_SECONDS` | no se define (0) | `3600` | `0` |
+| `HISTORY_WINDOW` | por omisión | por omisión | `6` |
+| `MODEL_MAX_TOKENS` | por omisión | por omisión | `300` |
+
+El HR no lleva caché porque responde con datos de empleados: cachearlos guardaría datos personales en
+Cloudflare y una respuesta vieja podría mostrar un dato que ya cambió. `CACHE_TTL_SECONDS` no se
+agrega a mano en Render > Environment del HR.
+
 ## Principios
 
 - Sin estado de negocio: el historial vive en el navegador (ADR 0001).
@@ -213,7 +246,9 @@ flowchart LR
   llevan textos, claves ni datos personales (ADR 0015). `status` se suma junto con `requests`; lo demás,
   una vez por cada `200` de `/ask` con los datos del evento `agent_run` (ADR 0016).
 - Trazas en LangSmith opcionales, con entradas y salidas ocultas por omisión (ADR 0006).
-- Enrutamiento por regla, modelo real por AI Gateway y costo medido (ADR 0007, 0008 y 0009).
+- Enrutamiento por regla, modelo real por AI Gateway y costo medido (ADR 0007, 0008 y 0009). En
+  producción el enrutamiento está apagado en los dos servicios y la caché del gateway solo se usa en
+  Políticas; el código del enrutador se conserva para una medición futura (ADR 0017).
 - Una clave por cliente en una dependencia de ruta; la clave nunca se escribe, solo el nombre del
   cliente (ADR 0010).
 - Límite por cliente en memoria con reloj inyectado; con varias copias se multiplica (ADR 0011).
@@ -243,7 +278,8 @@ flowchart LR
 | `COMPANION_URL` | vacía | `page.py`; vacía: sin enlace. En Render se escribe a mano en Environment |
 | `COMPANION_NAME` | `Asistente de políticas de RH` | `page.py`; texto del enlace |
 
-La especificación 07 no agrega variables.
+La especificación 07 no agrega variables. La especificación 08 tampoco: fija en `render.yaml` el valor
+de producción de `ROUTING` y `CACHE_TTL_SECONDS` (tabla de «Configuración de producción»).
 
 ## Dónde mirar
 
@@ -251,7 +287,10 @@ La especificación 07 no agrega variables.
   `client`.
 - Métricas: `GET /metrics` con una clave; el `pid` dice de qué copia vienen. Uso y costo por modelo en
   `by_model`, herramientas en `tools`, respuestas cortadas en `stopped`, caché en `cached_calls` y
-  clases de código en `status`.
+  clases de código en `status`. En producción `by_model` solo muestra `MODEL_LARGE`, `cached_calls`
+  queda en 0 en el HR y la latencia del modelo grande se vigila con `latency_ms` y `slo`.
+- Respuestas de `/ask` en producción: `route` es `routing_disabled` y `model` es `MODEL_LARGE`.
+- Configuración de producción: `render.yaml`; la comprueba `verification/contract/test_contract_08.py`.
 - Documentación de la API: Swagger en `/docs`, abierto sin clave, con «Authorize» para `X-API-Key`.
 - Pipeline: la pestaña Actions del repositorio, una etapa por trabajo; las de Políticas terminan en
   `-politicas`.
